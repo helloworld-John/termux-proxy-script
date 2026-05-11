@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  局域网共享代理管理面板
-#  依赖: gost  （选 1 启动时若未安装会自动通过包管理器或镜像站安装）
+#  依赖: gost  （选 1 启动时若未安装会自动通过包管理器或官方源安装）
 #  用法: gv            ← 任意目录直接敲这三个字母
 #        bash ~/gv.sh  ← 或完整路径
 # ============================================================
@@ -22,26 +22,22 @@ PID_FILE="$HOME/.gv_proxy.pid"
 LOG_FILE="$HOME/.gv_proxy.log"
 SELF_PATH="$HOME/gv.sh"
 # 自动适配 Termux 或 标准 Linux 路径
-PREFIX_PATH="${PREFIX:-/usr}"
+PREFIX_PATH="${PREFIX:-/data/data/com.termux/files/usr}"
 LAUNCHER_BIN="$PREFIX_PATH/bin/gv"
-GOST_BIN="$(which gost 2>/dev/null)"
+GOST_BIN=""
 
 # ---------- 工具函数 ----------
 
 # 将脚本固化到 ~/gv.sh，并在 PATH 或环境配置文件中注入全局入口
-# 确保无论从哪里、用任何方式调用，`gv` 都能稳定生效
 _write_launcher() {
-    # 1. 获取本脚本的真实磁盘路径
     local real_path
     real_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null)"
 
-    # 2. 同步到 ~/gv.sh 并赋予执行权限
     if [[ -f "$real_path" && "$real_path" != "$SELF_PATH" ]]; then
         cp -f "$real_path" "$SELF_PATH"
         chmod +x "$SELF_PATH"
     fi
 
-    # 3. 尝试在 PREFIX/bin 写一个极简启动器
     local write_success=false
     if touch "$LAUNCHER_BIN" 2>/dev/null; then
         cat > "$LAUNCHER_BIN" << 'LAUNCHER_EOF'
@@ -51,18 +47,15 @@ LAUNCHER_EOF
         chmod +x "$LAUNCHER_BIN" 2>/dev/null && write_success=true
     fi
 
-    # 4. 双重保险：如果写入系统 PATH 失败，或者为了适配多终端，注入 alias 到 bash/zsh 配置文件
     for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
         if [[ -f "$rc" ]] && ! grep -q "alias gv=" "$rc"; then
             echo -e "\n# gv proxy panel shortcut\nalias gv='bash \"$HOME/gv.sh\"'" >> "$rc"
         fi
     done
 
-    # 重新加载当前 shell 的 alias (对正在运行的当前终端生效)
     alias gv='bash "$HOME/gv.sh"' 2>/dev/null || true
 }
 
-# 从 ifconfig/ip 暴力扫描局域网 IP
 _get_lan_ips() {
     local raw
     raw=$(ifconfig 2>/dev/null || ip addr 2>/dev/null)
@@ -71,17 +64,14 @@ _get_lan_ips() {
         | sort -u
 }
 
-# 读取配置（socks_port http_port）
 _load_config() {
     SOCKS_PORT=""
     HTTP_PORT=""
     if [[ -f "$CONFIG_FILE" ]]; then
-        # shellcheck source=/dev/null
         source "$CONFIG_FILE"
     fi
 }
 
-# 保存配置
 _save_config() {
     cat > "$CONFIG_FILE" <<EOF
 SOCKS_PORT=$SOCKS_PORT
@@ -89,14 +79,12 @@ HTTP_PORT=$HTTP_PORT
 EOF
 }
 
-# 检查端口是否被占用
 _port_free() {
     local port=$1
     ! ss -lntu 2>/dev/null | grep -q ":${port} " && \
     ! netstat -lntu 2>/dev/null | grep -q ":${port} "
 }
 
-# 在 10000-60000 内随机挑一个空闲端口
 _random_port() {
     local p
     while true; do
@@ -105,45 +93,51 @@ _random_port() {
     done
 }
 
-# 验证端口合法性 (1024-65535)
 _valid_port() {
     local p=$1
     [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1024 && p <= 65535 ))
 }
 
-# ---------- 检查 / 镜像自动安装 gost ----------
+# ---------- 检查 / 官方自动安装 gost ----------
 _check_gost() {
-    GOST_BIN="$(which gost 2>/dev/null)"
-    # 如果用户目录有自行下载的备用二进制文件，也认领
-    if [[ -z "$GOST_BIN" && -x "$HOME/.local/bin/gost" ]]; then
-        GOST_BIN="$HOME/.local/bin/gost"
-    fi
-
-    if [[ -n "$GOST_BIN" ]]; then
-        return 0
-    fi
-
-    echo -e "${C_YELLOW}未检测到 gost，正在尝试自动安装...${C_RESET}"
+    # 1. 强化多路径检测，防止 Termux 环境下 which 命令找不到的情况
+    local search_paths=(
+        "$(which gost 2>/dev/null)"
+        "${PREFIX_PATH}/bin/gost"
+        "/data/data/com.termux/files/usr/bin/gost"
+        "$HOME/.local/bin/gost"
+    )
     
-    # 1. 尝试使用常规包管理器安装
+    for p in "${search_paths[@]}"; do
+        if [[ -n "$p" && -x "$p" ]]; then
+            GOST_BIN="$p"
+            return 0
+        fi
+    done
+
+    echo -e "${C_YELLOW}未检测到 gost 可执行文件，正在尝试自动安装...${C_RESET}"
+    
+    # 2. 优先尝试使用常规包管理器安装
     echo -e "${C_DIM}>> 尝试包管理器安装 (pkg/apt)...${C_RESET}"
     if command -v pkg >/dev/null 2>&1; then
-        pkg install gost -y 2>/dev/null
+        pkg install gost -y
     elif command -v apt >/dev/null 2>&1; then
         apt update 2>/dev/null && apt install gost -y 2>/dev/null
     fi
 
-    GOST_BIN="$(which gost 2>/dev/null)"
-    if [[ -n "$GOST_BIN" ]]; then
-        echo -e "\n${C_GREEN}[✓] gost 包管理器安装成功！${C_RESET}"
-        sleep 0.5
-        return 0
-    fi
+    # 再次使用强化路径检测
+    for p in "${search_paths[@]}"; do
+        if [[ -n "$p" && -x "$p" ]]; then
+            GOST_BIN="$p"
+            echo -e "\n${C_GREEN}[✓] gost 包管理器安装成功！${C_RESET}"
+            sleep 0.5
+            return 0
+        fi
+    done
 
-    # 2. 包管理器失败，采用镜像网站下载二进制文件
-    echo -e "${C_YELLOW}包管理器无可用版本，正在通过 Github 镜像站下载...${C_RESET}"
+    # 3. 包管理器失败，直接从 GitHub 官方直连下载
+    echo -e "${C_YELLOW}包管理器无可用版本，正在通过 GitHub 官方下载...${C_RESET}"
     
-    # 识别系统架构
     local arch
     arch=$(uname -m)
     local gost_arch="amd64"
@@ -156,20 +150,20 @@ _check_gost() {
 
     local version="2.11.5"
     local filename="gost-linux-${gost_arch}-${version}.gz"
-    local mirror_url="https://mirror.ghproxy.com/https://github.com/ginuerzh/gost/releases/download/v${version}/${filename}"
+    # 直接使用官方地址
+    local official_url="https://github.com/ginuerzh/gost/releases/download/v${version}/${filename}"
 
     echo -e "${C_DIM}>> 识别架构: ${gost_arch} | 下载版本: v${version}${C_RESET}"
-    echo -e "${C_DIM}>> 请求镜像源: mirror.ghproxy.com ...${C_RESET}"
+    echo -e "${C_DIM}>> 请求官方直连: ${official_url} ...${C_RESET}"
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
     cd "$tmp_dir" || return 1
 
-    if curl -L -k -# "$mirror_url" -o gost.gz; then
+    if curl -L -k -# "$official_url" -o gost.gz; then
         gzip -d gost.gz
         chmod +x gost
         
-        # 尝试安装到环境变量目录，失败则存放到用户目录
         local bin_target="$PREFIX_PATH/bin/gost"
         if mv gost "$bin_target" 2>/dev/null; then
             GOST_BIN="$bin_target"
@@ -182,14 +176,12 @@ _check_gost() {
     cd - >/dev/null || true
     rm -rf "$tmp_dir"
 
-    # 验证镜像下载的程序能否运行
     if [[ -n "$GOST_BIN" ]] && "$GOST_BIN" -V >/dev/null 2>&1; then
-        echo -e "\n${C_GREEN}[✓] gost 镜像版下载并安装成功！${C_RESET}"
+        echo -e "\n${C_GREEN}[✓] gost 官方版下载并安装成功！${C_RESET}"
         sleep 0.5
         return 0
     fi
 
-    # 安装失败兜底提示
     echo -e "\n${C_RED}[✗] 自动安装失败，请检查网络或手动安装。${C_RESET}"
     echo -e "    手动命令: pkg install gost"
     echo -e "    ${C_DIM}（或从 https://github.com/go-gost/gost/releases 自行下载）${C_RESET}"
@@ -215,19 +207,16 @@ _start_proxy() {
 
     _load_config
 
-    # 若无配置，引导设置端口
     if [[ -z "$SOCKS_PORT" || -z "$HTTP_PORT" ]]; then
         echo -e "\n${C_YELLOW}首次运行，请配置端口：${C_RESET}"
         _set_ports_interactive
         _load_config
     fi
 
-    # 先停掉旧进程
     _stop_proxy_silent
 
     echo -e "\n${C_CYAN}正在启动代理...${C_RESET}"
 
-    # Gost 同时开 socks5 + http，全网卡监听
     nohup "$GOST_BIN" \
         -L "socks5://0.0.0.0:${SOCKS_PORT}" \
         -L "http://0.0.0.0:${HTTP_PORT}" \
@@ -243,7 +232,6 @@ _start_proxy() {
     fi
 }
 
-# 静默停止（内部调用）
 _stop_proxy_silent() {
     if [[ -f "$PID_FILE" ]]; then
         local old_pid
@@ -252,11 +240,9 @@ _stop_proxy_silent() {
         rm -f "$PID_FILE"
         sleep 0.3
     fi
-    # 兜底：杀掉残留 gost 进程
     pkill -f "gost.*0.0.0.0" 2>/dev/null || true
 }
 
-# ---------- 卸载代理 ----------
 _uninstall_proxy() {
     _stop_proxy_silent
     rm -f "$CONFIG_FILE" "$PID_FILE" "$LOG_FILE"
@@ -264,7 +250,6 @@ _uninstall_proxy() {
     echo -e "${C_DIM}    如需完全卸载 gost 本体：pkg remove gost${C_RESET}"
 }
 
-# ---------- 修改端口（交互） ----------
 _set_ports_interactive() {
     echo ""
     echo -e "${C_WHITE}╔══ 端口配置 ═════════════════════════════════╗${C_RESET}"
@@ -272,7 +257,6 @@ _set_ports_interactive() {
     echo -e "${C_WHITE}║${C_RESET}  直接回车 → 在 ${C_CYAN}10000-60000${C_RESET} 内随机分配"
     echo -e "${C_WHITE}╚══════════════════════════════════════════════╝${C_RESET}"
 
-    # Socks 端口
     while true; do
         read -rp "  Socks 端口 [回车随机]: " input_socks
         if [[ -z "$input_socks" ]]; then
@@ -287,7 +271,6 @@ _set_ports_interactive() {
         fi
     done
 
-    # HTTP 端口
     while true; do
         read -rp "  HTTP  端口 [回车随机]: " input_http
         if [[ -z "$input_http" ]]; then
@@ -310,7 +293,6 @@ _set_ports_interactive() {
     echo -e "\n  ${C_GREEN}[✓] 端口已保存：Socks=${SOCKS_PORT}  HTTP=${HTTP_PORT}${C_RESET}"
 }
 
-# ---------- 实时日志 ----------
 _view_log() {
     if [[ ! -f "$LOG_FILE" ]]; then
         echo -e "${C_YELLOW}暂无日志文件，请先启动代理。${C_RESET}"
@@ -320,12 +302,9 @@ _view_log() {
     tail -f "$LOG_FILE"
 }
 
-# ---------- 绘制主面板 ----------
 _draw_panel() {
     clear
     _load_config
-
-    # --- IP 列表 ---
     local lan_ips
     lan_ips=$(_get_lan_ips)
 
@@ -333,13 +312,9 @@ _draw_panel() {
     echo -e "${C_BOLD}${C_WHITE}╔══════════════════════════════════════════════╗${C_RESET}"
     echo -e "${C_BOLD}${C_WHITE}║        局域网共享代理  管理面板              ║${C_RESET}"
     echo -e "${C_BOLD}${C_WHITE}╠══════════════════════════════════════════════╣${C_RESET}"
-
-    # 状态行
     printf "${C_BOLD}${C_WHITE}║${C_RESET}  状态  %-38s${C_BOLD}${C_WHITE}║${C_RESET}\n" "$(_status_line)"
-
     echo -e "${C_BOLD}${C_WHITE}╠══════════════════════════════════════════════╣${C_RESET}"
 
-    # 当前配置
     if [[ -n "$SOCKS_PORT" && -n "$HTTP_PORT" ]]; then
         echo -e "${C_WHITE}║${C_RESET}  Socks 端口 : ${C_CYAN}${SOCKS_PORT}${C_RESET}"
         echo -e "${C_WHITE}║${C_RESET}  HTTP  端口 : ${C_CYAN}${HTTP_PORT}${C_RESET}"
@@ -348,8 +323,6 @@ _draw_panel() {
     fi
 
     echo -e "${C_BOLD}${C_WHITE}╠══════════════════════════════════════════════╣${C_RESET}"
-
-    # 局域网 IP（暴力扫描结果）
     echo -e "${C_WHITE}║${C_RESET}  ${C_BOLD}本机局域网 IP：${C_RESET}"
     if [[ -z "$lan_ips" ]]; then
         echo -e "${C_WHITE}║${C_RESET}    ${C_YELLOW}（未检测到局域网 IP，请检查 WiFi 连接）${C_RESET}"
@@ -384,7 +357,6 @@ _draw_panel() {
     echo ""
 }
 
-# ---------- 查看当前配置 ----------
 _show_config() {
     _load_config
     local lan_ips
@@ -409,9 +381,7 @@ _show_config() {
     echo ""
 }
 
-# ---------- 主循环 ----------
 main() {
-    # 将自身写到 ~/gv.sh 并注入环境，保证快捷启动
     _write_launcher
 
     while true; do
@@ -439,7 +409,6 @@ main() {
                 ;;
             5)
                 _set_ports_interactive
-                # 如果代理正在运行，询问是否立即重启生效
                 if _is_running; then
                     echo ""
                     read -rp "  代理正在运行，是否立即重启以应用新端口？(Y/n): " restart
