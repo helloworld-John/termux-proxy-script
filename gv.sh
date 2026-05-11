@@ -1,12 +1,10 @@
 #!/bin/bash
 # ==========================================
-# Termux 局域网共享代理管理脚本 (Gost版)
-# 包含交互菜单与客户端配置一键生成
+# Termux 局域网共享代理管理脚本 (Gost版) - 已修复下载Bug
 # ==========================================
 
 # --- 1. 全局变量配置 ---
 GOST_VERSION="2.11.5"
-ARCH="linux-armv8"
 BIN_DIR="$PREFIX/bin"
 LOG_FILE="$HOME/gost_proxy.log"
 PORT_SOCKS=10800
@@ -22,28 +20,42 @@ get_local_ip() {
     fi
 }
 
-# 检查并安装 Gost 环境
+# 检查并安装 Gost 环境 (Bug已修复)
 install_gost() {
     if [ ! -f "$BIN_DIR/gost" ]; then
         echo -e "\n[*] 未检测到 gost 核心，正在自动下载安装..."
         pkg update -y -q
-        pkg install -y wget tar inetutils -q
+        # 注意这里新增了 gzip 工具
+        pkg install -y wget gzip inetutils -q 
         
-        # 使用加速镜像下载
-        DOWNLOAD_URL="https://gh-proxy.com/https://github.com/ginuerzh/gost/releases/download/v${GOST_VERSION}/gost-lite_${GOST_VERSION}_${ARCH}.tar.gz"
-        wget -qO gost.tar.gz "$DOWNLOAD_URL"
-        tar -xzf gost.tar.gz
+        # 修正了官方的命名格式与后缀 (.gz) 以及更稳定的镜像源
+        DOWNLOAD_URL="https://mirror.ghproxy.com/https://github.com/ginuerzh/gost/releases/download/v${GOST_VERSION}/gost-linux-armv8-${GOST_VERSION}.gz"
         
-        mv "gost-lite_${GOST_VERSION}_${ARCH}/gost" "$BIN_DIR/gost"
-        chmod +x "$BIN_DIR/gost"
-        rm -rf gost.tar.gz "gost-lite_${GOST_VERSION}_${ARCH}"
-        echo "[+] Gost 核心安装完毕！"
+        echo "[*] 正在拉取核心组件，请稍候..."
+        wget -qO gost.gz "$DOWNLOAD_URL"
+        
+        # 增加文件校验，防止静默失败
+        if [ -s gost.gz ]; then
+            gzip -d gost.gz
+            mv gost "$BIN_DIR/gost"
+            chmod +x "$BIN_DIR/gost"
+            echo "[+] Gost 核心安装完毕！"
+        else
+            echo "[!] 下载失败，请检查网络。"
+            rm -f gost.gz
+            return 1
+        fi
     fi
 }
 
 # 启动代理服务
 start_proxy() {
     install_gost
+    # 如果安装失败则中断启动
+    if [ $? -ne 0 ]; then
+        return
+    fi
+    
     # 清理可能残留的旧进程
     pkill -f "gost -L=socks5" 2>/dev/null
     sleep 1
@@ -62,7 +74,7 @@ stop_proxy() {
     echo -e "\n[!] 已彻底停止代理进程，释放端口。"
 }
 
-# 显示节点配置与导入信息 (核心功能点)
+# 显示节点配置与导入信息
 show_config() {
     get_local_ip
     echo -e "\n========================================="
@@ -73,7 +85,6 @@ show_config() {
     echo -e "【HTTP   端口 】: $PORT_HTTP\n"
 
     echo -e "--- 🔗 通用 URI 链接 (Hiddify 等直接复制导入) ---"
-    # Hiddify 等工具支持直接从剪贴板识别此类标准 URI
     echo -e "socks5://$LOCAL_IP:$PORT_SOCKS#Termux-Socks5"
     echo -e "http://$LOCAL_IP:$PORT_HTTP#Termux-HTTP\n"
 
@@ -134,5 +145,4 @@ show_menu() {
 }
 
 # --- 4. 脚本入口 ---
-# 触发主循环
 show_menu
