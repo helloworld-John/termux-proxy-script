@@ -17,7 +17,7 @@ NC='\033[0m' # No Color
 
 # ================= 核心依赖与安装 =================
 check_dependencies() {
-    # 移除了 Python，只保留最基础的系统工具
+    # 纯净版：移除了 Python，只保留最基础的系统工具
     local pkgs="screen iproute2 coreutils curl"
     for pkg in $pkgs; do
         if ! command -v $pkg &> /dev/null; then
@@ -44,12 +44,15 @@ check_dependencies() {
 }
 
 # ================= 辅助函数 =================
-# 获取局域网 IP
+# 智能获取局域网真实 IP
 get_lan_ip() {
     local ip
-    ip=$(ip -4 addr show wlan0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+    # 逻辑：列出所有 IPv4 地址 -> 过滤掉 127.0.0.1 -> 提取纯数字 IP -> 只取第一个
+    ip=$(ip -4 addr show | grep inet | grep -v '127.0.0.1' | awk '{print $2}' | cut -d/ -f1 | head -n 1)
+    
     if [ -z "$ip" ]; then
-        echo "127.0.0.1"
+        # 找不到真实 IP 时给出明确汉字警告
+        echo "【未检测到有效内网IP_请确认手机已连WiFi或热点】"
     else
         echo "$ip"
     fi
@@ -65,6 +68,7 @@ get_valid_port() {
         echo -ne "${BLUE}$prompt_text [默认: $default_port, 回车跳过]: ${NC}"
         read input_port
         
+        # 回车跳过处理
         if [ -z "$input_port" ]; then
             if [ -z "$default_port" ]; then
                 echo $(shuf -i 10000-65535 -n 1)
@@ -74,6 +78,7 @@ get_valid_port() {
             return
         fi
         
+        # 验证数字及范围
         if [[ "$input_port" =~ ^[0-9]+$ ]] && [ "$input_port" -ge 10000 ] && [ "$input_port" -le 65535 ]; then
             echo "$input_port"
             return
@@ -90,7 +95,7 @@ generate_config() {
     
     echo -e "${GREEN}正在生成 Gost 配置...${NC}"
     
-    # 巧妙利用 Gost 内置的 file handler 来充当 Web 服务器分发订阅
+    # 巧妙利用 Gost 内置的 file handler 充当 Web 服务器分发订阅
     cat <<EOF > "$CONFIG_FILE"
 services:
   - name: service-socks5
@@ -191,7 +196,14 @@ show_info() {
     
     clear
     echo "================ 局域网代理信息 ================"
-    echo -e "设备内网 IP : ${GREEN}$lan_ip${NC} (请确保客户端在同一 Wi-Fi 下)"
+    
+    # 针对未连网的情况变红警示
+    if [[ "$lan_ip" == *"未检测"* ]]; then
+        echo -e "设备内网 IP : ${RED}$lan_ip${NC}"
+    else
+        echo -e "设备内网 IP : ${GREEN}$lan_ip${NC} (请确保客户端在同一 Wi-Fi 下)"
+    fi
+    
     echo -e "Socks5 端口 : ${GREEN}$s_port${NC}"
     echo -e "HTTP 端口   : ${GREEN}$h_port${NC}"
     echo "================================================"
