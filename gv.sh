@@ -1,12 +1,13 @@
 #!/bin/bash
 # ==========================================
-# Termux 局域网共享代理管理脚本 (Gost v3 完美融合版)
+# Termux 局域网共享代理管理脚本 (JSON 配置版)
 # ==========================================
 
 # --- 1. 全局变量与配置持久化 ---
 GOST_VERSION="3.0.0"
 BIN_DIR="$PREFIX/bin"
-CONF_FILE="$HOME/gost_config.yaml"
+# 改为 .json 后缀
+CONF_FILE="$HOME/gost_config.json" 
 LOG_FILE="$HOME/gost_proxy.log"
 USER_PREF_FILE="$HOME/.gost_ports.conf"
 
@@ -42,7 +43,6 @@ install_gost() {
         
         if [ -s gost.tar.gz ]; then
             tar -xzf gost.tar.gz
-            # 兼容解压后是否有文件夹
             if [ -f "gost_3.0.0_linux_arm64/gost" ]; then
                 mv "gost_3.0.0_linux_arm64/gost" "$BIN_DIR/gost"
             else
@@ -60,42 +60,63 @@ install_gost() {
     return 0
 }
 
-# 动态生成 YAML 配置文件
-generate_yaml() {
+# 核心修复：改为生成标准的 JSON 配置文件
+generate_json_config() {
     get_local_ip
     cat > "$CONF_FILE" <<EOF
-services:
-  - name: service-socks5
-    addr: "${LOCAL_IP}:${PORT_SOCKS}"
-    resolver: resolver-0
-    handler:
-      type: socks5
-      metadata:
-        udp: true
-        udpbuffersize: 4096
-    listener:
-      type: tcp
-  - name: service-http
-    addr: "${LOCAL_IP}:${PORT_HTTP}"
-    resolver: resolver-0
-    handler:
-      type: http
-      metadata:
-        udp: true
-        udpbuffersize: 4096
-    listener:
-      type: tcp
-resolvers:
-  - name: resolver-0
-    nameservers:
-      - addr: tls://8.8.8.8:853
-        prefer: ipv4
-        ttl: 5m0s
-        async: true
-      - addr: tls://8.8.4.4:853
-        prefer: ipv4
-        ttl: 5m0s
-        async: true
+{
+  "services": [
+    {
+      "name": "service-socks5",
+      "addr": "${LOCAL_IP}:${PORT_SOCKS}",
+      "resolver": "resolver-0",
+      "handler": {
+        "type": "socks5",
+        "metadata": {
+          "udp": true,
+          "udpbuffersize": 4096
+        }
+      },
+      "listener": {
+        "type": "tcp"
+      }
+    },
+    {
+      "name": "service-http",
+      "addr": "${LOCAL_IP}:${PORT_HTTP}",
+      "resolver": "resolver-0",
+      "handler": {
+        "type": "http",
+        "metadata": {
+          "udp": true,
+          "udpbuffersize": 4096
+        }
+      },
+      "listener": {
+        "type": "tcp"
+      }
+    }
+  ],
+  "resolvers": [
+    {
+      "name": "resolver-0",
+      "nameservers": [
+        {
+          "addr": "tls://8.8.8.8:853",
+          "prefer": "ipv4",
+          "ttl": "5m0s",
+          "async": true
+        },
+        {
+          "addr": "tls://8.8.4.4:853",
+          "prefer": "ipv4",
+          "ttl": "5m0s",
+          "async": true
+        }
+      ]
+    }
+  ]
+}
 EOF
 }
 
@@ -109,9 +130,8 @@ start_proxy() {
     sleep 1
     
     echo -e "\n[*] 正在生成配置并启动代理..."
-    generate_yaml
+    generate_json_config
     
-    # 彻底杜绝使用 127.0.0.1 导致局域网失效的问题
     if [ "$LOCAL_IP" == "127.0.0.1" ]; then
         echo -e "\n\033[31m[错误] 当前获取到的 IP 为 127.0.0.1，局域网共享必将失败！\033[0m"
         echo -e "请在主菜单按 [5] 手动绑定您手机在 Wi-Fi 下的真实 IP！"
@@ -197,7 +217,7 @@ show_menu() {
     local running=1
     while [ $running -eq 1 ]; do
         echo -e "\n========================================="
-        echo -e "    Termux 代理控制台 (Gost v3 DNS强化版)"
+        echo -e "    Termux 代理控制台 (Gost v3 终极修复版)"
         echo -e "========================================="
         
         if pgrep -f "gost -C" > /dev/null; then
