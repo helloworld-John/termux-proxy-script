@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==========================================
 # Local-Proxy-Hub 局域网共享代理 (Gost v3 通用版)
-# 特性：全网卡被动监听 (0.0.0.0)，随机可用端口，自动架构检测，全局快捷指令
+# 特性：全网卡被动监听，随机可用端口，强力IP提取，全局快捷指令
 # ==========================================
 
 # --- 全局路径与变量 ---
@@ -14,59 +14,63 @@ SHORTCUT_NAME="gv"
 # 加载本地保存的配置
 [ -f "$PREF_FILE" ] && source "$PREF_FILE"
 
-# --- 自动设置全局快捷指令 ---
+# --- 暴力设置全局快捷指令 ---
 setup_shortcut() {
-    # 获取当前脚本的绝对路径
-    SCRIPT_DIR=$(cd "$(dirname "$0")"; pwd)
-    SCRIPT_PATH="$SCRIPT_DIR/$(basename "$0")"
+    # 绝对定位当前脚本
+    SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
     
-    # 检测运行环境以确定可执行目录
-    if [ -n "$PREFIX" ] && [ -d "$PREFIX/bin" ]; then
-        BIN_DIR="$PREFIX/bin" # Termux 环境
+    # 暴力判断存放环境 (优先 Termux 真实路径)
+    if [ -d "/data/data/com.termux/files/usr/bin" ]; then
+        BIN_DIR="/data/data/com.termux/files/usr/bin"
     elif [ -w "/usr/local/bin" ]; then
-        BIN_DIR="/usr/local/bin" # 拥有 root 权限的 Linux
-    elif [ -d "$HOME/.local/bin" ]; then
-        BIN_DIR="$HOME/.local/bin" # 普通用户 Linux
-        export PATH="$HOME/.local/bin:$PATH"
+        BIN_DIR="/usr/local/bin"
     else
-        BIN_DIR=""
+        BIN_DIR="$HOME/.local/bin"
+        mkdir -p "$BIN_DIR" 2>/dev/null
     fi
 
-    # 创建快捷指令
-    if [ -n "$BIN_DIR" ]; then
-        if [ ! -f "$BIN_DIR/$SHORTCUT_NAME" ] || [ "$(cat "$BIN_DIR/$SHORTCUT_NAME")" != "#!/bin/bash"$'\n'"bash \"$SCRIPT_PATH\"" ]; then
-            echo "#!/bin/bash" > "$BIN_DIR/$SHORTCUT_NAME"
-            echo "bash \"$SCRIPT_PATH\"" >> "$BIN_DIR/$SHORTCUT_NAME"
-            chmod +x "$BIN_DIR/$SHORTCUT_NAME"
-        fi
-    else
-        # 降级方案：写入 alias
-        if ! grep -q "alias $SHORTCUT_NAME=" "$HOME/.bashrc" 2>/dev/null; then
-            echo "alias $SHORTCUT_NAME='bash \"$SCRIPT_PATH\"'" >> "$HOME/.bashrc"
-            source "$HOME/.bashrc" 2>/dev/null
-        fi
+    # 写入快捷唤醒脚本
+    if [ -d "$BIN_DIR" ]; then
+        cat > "$BIN_DIR/$SHORTCUT_NAME" <<EOF
+#!/bin/bash
+bash "$SCRIPT_PATH"
+EOF
+        chmod +x "$BIN_DIR/$SHORTCUT_NAME"
     fi
 }
 
-# --- 实时获取并显示网卡 IP ---
+# --- 强力获取局域网 IP ---
 get_network_status() {
-    # 尝试提取 wlan0 (WIFI) 的 IP 信息
-    NET_INFO=$(ifconfig wlan0 2>/dev/null | grep -w 'inet')
-    DISPLAY_IP=$(echo "$NET_INFO" | awk '{print $2}')
+    DISPLAY_IP=""
+    NET_INFO=""
+
+    # 1. 尝试使用 ip 命令精准匹配 (最可靠)
+    DISPLAY_IP=$(ip -4 addr show wlan0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
     
-    # 如果没有 wlan0，尝试获取系统默认主网卡 IP
+    # 2. 如果失败，尝试使用 ifconfig 匹配 (兼容老安卓，去除可能存在的 addr: 字符)
     if [ -z "$DISPLAY_IP" ]; then
-        NET_INFO=$(ip -4 addr show 2>/dev/null | grep -w 'inet' | grep -v '127.0.0.1' | head -n 1)
-        DISPLAY_IP=$(echo "$NET_INFO" | awk '{print $2}' | cut -d/ -f1)
+        DISPLAY_IP=$(ifconfig wlan0 2>/dev/null | grep -i 'inet' | grep -v '127.0.0.1' | awk '{print $2}' | tr -d 'addr:')
+    fi
+    
+    # 3. 如果连 wlan0 都没有，尝试获取能上网的主路由 IP
+    if [ -z "$DISPLAY_IP" ]; then
+        DISPLAY_IP=$(ip -4 route get 8.8.8.8 2>/dev/null | grep -oP 'src \K\S+')
     fi
 
-    [ -z "$DISPLAY_IP" ] && DISPLAY_IP="未知 (请检查 WIFI 或热点是否开启)"
-    [ -z "$NET_INFO" ] && NET_INFO="无活动网卡信息"
+    # 4. 兜底方案：随便找一个非本地环回的 IP
+    if [ -z "$DISPLAY_IP" ]; then
+        DISPLAY_IP=$(ifconfig 2>/dev/null | grep -i 'inet' | grep -v '127.0.0.1' | head -n 1 | awk '{print $2}' | tr -d 'addr:')
+    fi
+
+    [ -z "$DISPLAY_IP" ] && DISPLAY_IP="未知 (请检查WIFI)"
+
+    # 生成展示信息
+    NET_INFO=$(ifconfig wlan0 2>/dev/null | grep -i 'inet' | head -n 1)
+    [ -z "$NET_INFO" ] && NET_INFO="当前主IP: $DISPLAY_IP"
 }
 
 # --- 核心下载与安装 ---
 install_core(){
-    # 自动检测架构
     ARCH=$(uname -m)
     case "$ARCH" in
         aarch64|arm64) GOST_ARCH="arm64" ;;
@@ -79,7 +83,6 @@ install_core(){
 
     if [ ! -e "$BIN_FILE" ]; then
         echo "正在下载 Gost 核心 ($GOST_ARCH)..."
-        # 使用通用加速代理
         curl -L -o gost.tar.gz -# --retry 2 --insecure "https://ghproxy.com/${DOWNLOAD_URL}"
         tar zxvf gost.tar.gz
         
@@ -97,7 +100,6 @@ install_core(){
 
 # --- 配置与启动代理 ---
 setup_proxy(){
-    # 安装必要依赖
     pkg install -y screen wget net-tools iproute2 2>/dev/null || apt install -y screen wget net-tools iproute2 2>/dev/null
     
     install_core
@@ -120,11 +122,9 @@ setup_proxy(){
         PORT_HTTP=$(shuf -i 10000-65535 -n 1)
     fi
 
-    # 保存配置
     echo "PORT_SOCKS=$PORT_SOCKS" > "$PREF_FILE"
     echo "PORT_HTTP=$PORT_HTTP" >> "$PREF_FILE"
 
-    # 生成 JSON 配置（采用 0.0.0.0 全网卡监听方案）
     cat > "$CONF_FILE" <<EOF
 {
   "services": [
@@ -144,7 +144,6 @@ setup_proxy(){
 }
 EOF
 
-    # 重启服务
     pkill -f "gost -C" 2>/dev/null
     nohup "$BIN_FILE" -C "$CONF_FILE" > "$LOG_FILE" 2>&1 &
     
@@ -156,13 +155,18 @@ EOF
 uninstall(){
     pkill -f "gost -C" 2>/dev/null
     rm -f "$BIN_FILE" "$CONF_FILE" "$LOG_FILE" "$PREF_FILE"
+    
+    # 顺手删掉快捷指令
+    if [ -d "/data/data/com.termux/files/usr/bin" ]; then
+        rm -f "/data/data/com.termux/files/usr/bin/$SHORTCUT_NAME"
+    fi
     echo "已彻底清理核心及配置文件。"
     sleep 2
 }
 
 # --- 主菜单 ---
 show_menu(){
-    # 启动前静默配置快捷指令
+    # 每次进入菜单自动修复快捷指令
     setup_shortcut
 
     while true; do
@@ -171,7 +175,7 @@ show_menu(){
         echo "================================================" 
         echo "        Local-Proxy-Hub 局域网代理服务          "
         echo "================================================" 
-        echo -e " 📡 \033[36m实时网卡状态:\033[0m"
+        echo -e " 📡 \033[36m实时网卡状态 (ifconfig/ip):\033[0m"
         echo -e "    $NET_INFO"
         echo "------------------------------------------------"
         echo " 1. 安装/配置/重启代理"
@@ -182,9 +186,9 @@ show_menu(){
         echo "------------------------------------------------"
         
         if pgrep -f "gost -C" > /dev/null; then
-            echo -e " 状态: \033[32m🟢 运行中\033[0m (全网卡被动监听模式)"
+            echo -e " 状态: \033[32m🟢 运行中\033[0m (0.0.0.0 全网卡被动监听)"
             echo "------------------------------------------------"
-            echo " 其他设备连接指南 (请确保设备在同一局域网):"
+            echo " 其他设备连接指南 (请确保设备在同一WIFI或热点下):"
             echo -e " - 目标 IP : \033[33m$DISPLAY_IP\033[0m"
             echo " - Socks5  : ${PORT_SOCKS}"
             echo " - Http    : ${PORT_HTTP}"
@@ -201,7 +205,7 @@ show_menu(){
             4) [ -f "$LOG_FILE" ] && tail -f "$LOG_FILE" || echo "暂无日志！"; sleep 2 ;;
             0) 
                 echo -e "\n已退出。"
-                echo -e "💡 \033[32m提示：你已经可以直接输入 \033[33mgv\033[32m 命令随时唤出此面板，无需输入繁琐路径！\033[0m\n"
+                echo -e "💡 \033[32m提示：全局快捷指令已注入！你现在可以直接输入 \033[33mgv\033[32m 并回车来唤出此面板。\033[0m\n"
                 exit 0 
                 ;;
             *) echo "无效输入，请重新选择"; sleep 1 ;;
