@@ -30,29 +30,47 @@ GOST_BIN=""
 
 # 将脚本固化到 ~/gv.sh，并在 PATH 或环境配置文件中注入全局入口
 _write_launcher() {
-    local real_path
-    real_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null)"
-
-    if [[ -f "$real_path" && "$real_path" != "$SELF_PATH" ]]; then
-        cp -f "$real_path" "$SELF_PATH"
-        chmod +x "$SELF_PATH"
+    # 1. 强化版：尝试通过多种方式获取当前脚本所在的真实文件路径
+    local src_file=""
+    if [[ -n "${BASH_SOURCE[0]}" && -f "${BASH_SOURCE[0]}" ]]; then
+        src_file="${BASH_SOURCE[0]}"
+    elif [[ -n "$0" && -f "$0" ]]; then
+        src_file="$0"
+    elif [[ -f "$PWD/$(basename "$0" 2>/dev/null)" ]]; then
+        src_file="$PWD/$(basename "$0")"
     fi
 
-    local write_success=false
+    # 2. 如果找到了源文件且不是目标位置，强制复制过去
+    if [[ -n "$src_file" && -f "$src_file" ]]; then
+        local real_path="$src_file"
+        # 尝试解析绝对路径，忽略解析失败的情况
+        command -v readlink >/dev/null 2>&1 && real_path="$(readlink -f "$src_file" 2>/dev/null || echo "$src_file")"
+        
+        if [[ "$real_path" != "$SELF_PATH" ]]; then
+            cp -f "$real_path" "$SELF_PATH" 2>/dev/null
+        fi
+    fi
+    
+    # 赋予执行权限
+    [[ -f "$SELF_PATH" ]] && chmod +x "$SELF_PATH" 2>/dev/null
+
+    # 3. 写入环境全局入口（/bin/gv）
     if touch "$LAUNCHER_BIN" 2>/dev/null; then
         cat > "$LAUNCHER_BIN" << 'LAUNCHER_EOF'
 #!/usr/bin/env bash
 exec bash "$HOME/gv.sh" "$@"
 LAUNCHER_EOF
-        chmod +x "$LAUNCHER_BIN" 2>/dev/null && write_success=true
+        chmod +x "$LAUNCHER_BIN" 2>/dev/null
     fi
 
+    # 4. 写入别名到 .bashrc / .zshrc
     for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
         if [[ -f "$rc" ]] && ! grep -q "alias gv=" "$rc"; then
             echo -e "\n# gv proxy panel shortcut\nalias gv='bash \"$HOME/gv.sh\"'" >> "$rc"
         fi
     done
 
+    # 运行时立即生效快捷键
     alias gv='bash "$HOME/gv.sh"' 2>/dev/null || true
 }
 
@@ -100,7 +118,6 @@ _valid_port() {
 
 # ---------- 检查 / 官方自动安装 gost ----------
 _check_gost() {
-    # 1. 强化多路径检测，防止 Termux 环境下 which 命令找不到的情况
     local search_paths=(
         "$(which gost 2>/dev/null)"
         "${PREFIX_PATH}/bin/gost"
@@ -117,7 +134,6 @@ _check_gost() {
 
     echo -e "${C_YELLOW}未检测到 gost 可执行文件，正在尝试自动安装...${C_RESET}"
     
-    # 2. 优先尝试使用常规包管理器安装
     echo -e "${C_DIM}>> 尝试包管理器安装 (pkg/apt)...${C_RESET}"
     if command -v pkg >/dev/null 2>&1; then
         pkg install gost -y
@@ -125,7 +141,6 @@ _check_gost() {
         apt update 2>/dev/null && apt install gost -y 2>/dev/null
     fi
 
-    # 再次使用强化路径检测
     for p in "${search_paths[@]}"; do
         if [[ -n "$p" && -x "$p" ]]; then
             GOST_BIN="$p"
@@ -135,7 +150,6 @@ _check_gost() {
         fi
     done
 
-    # 3. 包管理器失败，直接从 GitHub 官方直连下载
     echo -e "${C_YELLOW}包管理器无可用版本，正在通过 GitHub 官方下载...${C_RESET}"
     
     local arch
@@ -150,7 +164,6 @@ _check_gost() {
 
     local version="2.11.5"
     local filename="gost-linux-${gost_arch}-${version}.gz"
-    # 直接使用官方地址
     local official_url="https://github.com/ginuerzh/gost/releases/download/v${version}/${filename}"
 
     echo -e "${C_DIM}>> 识别架构: ${gost_arch} | 下载版本: v${version}${C_RESET}"
@@ -184,7 +197,6 @@ _check_gost() {
 
     echo -e "\n${C_RED}[✗] 自动安装失败，请检查网络或手动安装。${C_RESET}"
     echo -e "    手动命令: pkg install gost"
-    echo -e "    ${C_DIM}（或从 https://github.com/go-gost/gost/releases 自行下载）${C_RESET}"
     return 1
 }
 
@@ -204,7 +216,6 @@ _status_line() {
 # ---------- 启动代理 ----------
 _start_proxy() {
     _check_gost || return
-
     _load_config
 
     if [[ -z "$SOCKS_PORT" || -z "$HTTP_PORT" ]]; then
@@ -214,7 +225,6 @@ _start_proxy() {
     fi
 
     _stop_proxy_silent
-
     echo -e "\n${C_CYAN}正在启动代理...${C_RESET}"
 
     nohup "$GOST_BIN" \
@@ -247,7 +257,6 @@ _uninstall_proxy() {
     _stop_proxy_silent
     rm -f "$CONFIG_FILE" "$PID_FILE" "$LOG_FILE"
     echo -e "${C_YELLOW}[✓] 代理已停止，配置已清除。${C_RESET}"
-    echo -e "${C_DIM}    如需完全卸载 gost 本体：pkg remove gost${C_RESET}"
 }
 
 _set_ports_interactive() {
@@ -308,7 +317,12 @@ _draw_panel() {
     local lan_ips
     lan_ips=$(_get_lan_ips)
 
-    echo ""
+    # 兜底警告：如果到了主界面还没发现 ~/gv.sh，说明未能成功自写入
+    if [[ ! -f "$SELF_PATH" ]]; then
+        echo -e "${C_RED}【警告】脚本未被保存到 $SELF_PATH，下一次可能无法使用 'gv' 启动。${C_RESET}"
+        echo -e "${C_DIM}请确保你是用 'bash 文件名' 的方式运行它的，而不是直接粘贴代码到终端。${C_RESET}\n"
+    fi
+
     echo -e "${C_BOLD}${C_WHITE}╔══════════════════════════════════════════════╗${C_RESET}"
     echo -e "${C_BOLD}${C_WHITE}║        局域网共享代理  管理面板              ║${C_RESET}"
     echo -e "${C_BOLD}${C_WHITE}╠══════════════════════════════════════════════╣${C_RESET}"
@@ -330,18 +344,6 @@ _draw_panel() {
         while IFS= read -r ip; do
             echo -e "${C_WHITE}║${C_RESET}    ${C_GREEN}${ip}${C_RESET}"
         done <<< "$lan_ips"
-    fi
-
-    echo -e "${C_BOLD}${C_WHITE}╠══════════════════════════════════════════════╣${C_RESET}"
-    echo -e "${C_WHITE}║${C_RESET}  ${C_BOLD}客户端填写示例（以第一个 IP 为准）：${C_RESET}"
-
-    local first_ip
-    first_ip=$(echo "$lan_ips" | head -n1)
-    if [[ -n "$first_ip" && -n "$SOCKS_PORT" ]]; then
-        echo -e "${C_WHITE}║${C_RESET}    Socks : ${C_CYAN}${first_ip}${C_RESET} : ${C_CYAN}${SOCKS_PORT}${C_RESET}"
-        echo -e "${C_WHITE}║${C_RESET}    HTTP  : ${C_CYAN}${first_ip}${C_RESET} : ${C_CYAN}${HTTP_PORT}${C_RESET}"
-    else
-        echo -e "${C_WHITE}║${C_RESET}    ${C_DIM}（启动代理并连接 WiFi 后显示）${C_RESET}"
     fi
 
     echo -e "${C_BOLD}${C_WHITE}╠══════════════════════════════════════════════╣${C_RESET}"
@@ -389,45 +391,29 @@ main() {
         read -rp "  请输入选项 [0-5]: " choice
         echo ""
         case "$choice" in
-            1)
-                _start_proxy
-                read -rp "  按回车返回面板..." _dummy
-                ;;
-            2)
+            1) _start_proxy; read -rp "  按回车返回面板..." _dummy ;;
+            2) 
                 read -rp "  确认卸载？(y/N): " confirm
-                if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                    _uninstall_proxy
-                fi
-                read -rp "  按回车返回面板..." _dummy
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then _uninstall_proxy; fi
+                read -rp "  按回车返回面板..." _dummy 
                 ;;
-            3)
-                _show_config
-                read -rp "  按回车返回面板..." _dummy
-                ;;
-            4)
-                _view_log
-                ;;
-            5)
+            3) _show_config; read -rp "  按回车返回面板..." _dummy ;;
+            4) _view_log ;;
+            5) 
                 _set_ports_interactive
                 if _is_running; then
                     echo ""
                     read -rp "  代理正在运行，是否立即重启以应用新端口？(Y/n): " restart
-                    if [[ ! "$restart" =~ ^[Nn]$ ]]; then
-                        _start_proxy
-                    fi
+                    if [[ ! "$restart" =~ ^[Nn]$ ]]; then _start_proxy; fi
                 fi
                 read -rp "  按回车返回面板..." _dummy
                 ;;
             0)
                 echo -e "${C_DIM}已退出面板。代理进程继续在后台运行。${C_RESET}"
-                echo -e "${C_DIM}随时输入 ${C_RESET}${C_CYAN}gv${C_DIM} 重新打开面板。${C_RESET}"
-                echo ""
+                echo -e "${C_DIM}随时输入 ${C_RESET}${C_CYAN}gv${C_DIM} 重新打开面板。${C_RESET}\n"
                 exit 0
                 ;;
-            *)
-                echo -e "${C_RED}无效选项，请输入 0-5。${C_RESET}"
-                sleep 0.8
-                ;;
+            *) echo -e "${C_RED}无效选项，请输入 0-5。${C_RESET}"; sleep 0.8 ;;
         esac
     done
 }
