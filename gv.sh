@@ -1,192 +1,259 @@
 #!/bin/bash
-# ==========================================
-# Google_VPN 局域网共享 (DNS 强制接管版)
-# ==========================================
 
-BIN_FILE="$HOME/gost"
-CONF_FILE="$HOME/config.json"
-LOG_FILE="$HOME/gost_proxy.log"
-PREF_FILE="$HOME/.proxy_pref.conf"
+# ================= 环境变量与全局配置 =================
+GOST_DIR="$HOME/google_vpn_proxy"
+CONFIG_FILE="$GOST_DIR/config.yaml"
+GOST_BIN="$GOST_DIR/gost"
+SUB_DIR="$GOST_DIR/sub_server"
+SUB_PORT=8080
+LOG_FILE="$GOST_DIR/gost.log"
 
-PORT_SOCKS=10800
-BIND_IP=""
+# 颜色输出宏
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-[ -f "$PREF_FILE" ] && source "$PREF_FILE"
+# ================= 核心依赖与安装 =================
+check_dependencies() {
+    local pkgs="screen python iproute2 coreutils curl"
+    for pkg in $pkgs; do
+        if ! command -v $pkg &> /dev/null; then
+            echo -e "${YELLOW}检测到缺少依赖: $pkg，正在安装...${NC}"
+            pkg install -y $pkg
+        fi
+    done
 
-get_ip() {
-    if [ -n "$BIND_IP" ]; then
-        LOCAL_IP="$BIND_IP"
-    else
-        LOCAL_IP=$(ifconfig wlan0 2>/dev/null | grep -w 'inet' | awk '{print $2}')
-        [ -z "$LOCAL_IP" ] && LOCAL_IP="127.0.0.1"
+    mkdir -p "$GOST_DIR"
+    cd "$GOST_DIR" || exit
+
+    if [ ! -f "$GOST_BIN" ]; then
+        echo -e "${YELLOW}正在下载 Gost 核心...${NC}"
+        curl -L -o gost.tar.gz -# --retry 2 --insecure https://gh-proxy.com/https://raw.githubusercontent.com/yonggekkk/google_vpn_proxy/main/gost_3.0.0_linux_arm64.tar.gz
+        if [ $? -ne 0 ]; then
+             echo -e "${RED}下载失败，请确保您已有网络权限。${NC}"
+             exit 1
+        fi
+        tar zxvf gost.tar.gz
+        rm -f gost.tar.gz README* LICENSE*
+        chmod +x gost
     fi
 }
 
-generate_json_config() {
-    get_ip
-    # 核心：使用明确的 Google DNS，并增加解析超时处理
-    cat > "$CONF_FILE" <<EOF
-{
-  "services": [
-    {
-      "name": "service-socks5",
-      "addr": "${LOCAL_IP}:${PORT_SOCKS}",
-      "handler": {
-        "type": "socks5",
-        "metadata": {
-          "udp": true
-        },
-        "resolver": "dns-resolver"
-      },
-      "listener": {
-        "type": "tcp"
-      }
-    }
-  ],
-  "resolvers": [
-    {
-      "name": "dns-resolver",
-      "nameservers": [
-        {
-          "addr": "8.8.8.8:53",
-          "ttl": "60s"
-        },
-        {
-          "addr": "1.1.1.1:53",
-          "ttl": "60s"
-        }
-      ]
-    }
-  ]
+# ================= 辅助函数 =================
+# 获取局域网 IP (Termux 通常使用 wlan0)
+get_lan_ip() {
+    local ip
+    ip=$(ip -4 addr show wlan0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+    if [ -z "$ip" ]; then
+        echo "127.0.0.1"
+    else
+        echo "$ip"
+    fi
 }
+
+# 端口验证交互 (范围: 10000-65535)
+get_valid_port() {
+    local prompt_text="$1"
+    local default_port="$2"
+    local input_port
+    
+    while true; do
+        echo -ne "${BLUE}$prompt_text [默认: $default_port, 回车跳过]: ${NC}"
+        read input_port
+        
+        # 回车跳过则使用默认或随机
+        if [ -z "$input_port" ]; then
+            if [ -z "$default_port" ]; then
+                echo $(shuf -i 10000-65535 -n 1)
+            else
+                echo "$default_port"
+            fi
+            return
+        fi
+        
+        # 验证数字及范围
+        if [[ "$input_port" =~ ^[0-9]+$ ]] && [ "$input_port" -ge 10000 ] && [ "$input_port" -le 65535 ]; then
+            echo "$input_port"
+            return
+        else
+            echo -e "${RED}[错误] 端口必须是 10000 到 65535 之间的纯数字，请重新输入！${NC}" >&2
+        fi
+    done
+}
+
+# ================= 核心功能：生成配置与订阅 =================
+generate_config() {
+    local socks_port=$(get_valid_port "请设置 Socks5 端口" "")
+    local http_port=$(get_valid_port "请设置 HTTP 端口" "")
+    
+    echo -e "${GREEN}正在生成 Gost 配置...${NC}"
+    
+    # 写入 config.yaml (屏蔽部分冗长输出，逻辑不变)
+    cat <<EOF > "$CONFIG_FILE"
+services:
+  - name: service-socks5
+    addr: ":$socks_port"
+    resolver: resolver-0
+    handler:
+      type: socks5
+      metadata:
+        udp: true
+        udpbuffersize: 4096
+    listener:
+      type: tcp
+  - name: service-http
+    addr: ":$http_port"
+    resolver: resolver-0
+    handler:
+      type: http
+      metadata:
+        udp: true
+        udpbuffersize: 4096
+    listener:
+      type: tcp
+resolvers:
+  - name: resolver-0
+    nameservers:
+      - addr: tls://8.8.8.8:853
+        prefer: ipv4
+        async: true
+      - addr: tls://8.8.4.4:853
+        prefer: ipv4
+        async: true
+EOF
+    
+    echo -e "${GREEN}配置生成完毕！Socks5: $socks_port | HTTP: $http_port${NC}"
+}
+
+update_subscription() {
+    local lan_ip=$(get_lan_ip)
+    mkdir -p "$SUB_DIR"
+    
+    # 从配置文件读取当前设定的端口
+    local s_port=$(grep -A 1 'name: service-socks5' "$CONFIG_FILE" | grep 'addr:' | cut -d':' -f3 | tr -d '"')
+    local h_port=$(grep -A 1 'name: service-http' "$CONFIG_FILE" | grep 'addr:' | cut -d':' -f3 | tr -d '"')
+    
+    # 构建标准 URI scheme，并输出 Base64 到订阅文件
+    cat <<EOF | base64 > "$SUB_DIR/sub.txt"
+socks5://$lan_ip:$s_port#LAN-Socks5
+http://$lan_ip:$h_port#LAN-HTTP
 EOF
 }
 
-gvinstall(){
-    pkg install -y screen wget net-tools
-    if [ ! -e "$BIN_FILE" ]; then
-        echo "[*] 拉取核心组件..."
-        curl -L -o gost.tar.gz -# --retry 2 --insecure https://gh-proxy.com/https://raw.githubusercontent.com/yonggekkk/google_vpn_proxy/main/gost_3.0.0_linux_arm64.tar.gz
-        tar zxvf gost.tar.gz
-        [ -d "gost_3.0.0_linux_arm64" ] && mv gost_3.0.0_linux_arm64/gost "$BIN_FILE"
-        chmod +x "$BIN_FILE"
-        rm -rf gost.tar.gz README* LICENSE* gost_3.0.0_linux_arm64/
+# ================= 代理控制台操作 =================
+start_proxy() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${YELLOW}未检测到配置文件，请先进行配置。${NC}"
+        generate_config
     fi
-
-    get_ip
-    echo "当前绑定 IP: $LOCAL_IP"
-    read -p "设置 Socks5 端口 [$PORT_SOCKS]: " s_p
-    PORT_SOCKS=${s_p:-$PORT_SOCKS}
-
-    echo "PORT_SOCKS=$PORT_SOCKS" > "$PREF_FILE"
-    echo "BIND_IP=\"$BIND_IP\"" >> "$PREF_FILE"
-
-    generate_json_config
-
-    pkill -f "gost -C" 2>/dev/null
+    
+    # 强制清理旧进程
+    stop_proxy > /dev/null 2>&1
+    
+    echo -e "${YELLOW}正在启动 Gost 与订阅服务器...${NC}"
+    cd "$GOST_DIR" || exit
+    
+    # 启动 Gost
+    screen -dmS gost_proxy bash -c "./gost -C $CONFIG_FILE > $LOG_FILE 2>&1"
+    
+    # 启动订阅分发服务器
+    update_subscription
+    cd "$SUB_DIR" || exit
+    screen -dmS sub_server python -m http.server $SUB_PORT > /dev/null 2>&1
+    
+    echo -e "${GREEN}✓ 启动成功！${NC}"
     sleep 1
-    # 关键点：通过环境变量强制覆盖系统 DNS
-    export GOST_LOGGER_LEVEL=info
-    nohup "$BIN_FILE" -C "$CONF_FILE" > "$LOG_FILE" 2>&1 &
-    
-    echo "[+] 启动尝试完成。"
-    sleep 2
 }
 
-show_menu(){
-    while true; do
-        get_ip
-        clear
-        echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" 
-        echo "Google_VPN局域网共享代理 (DNS 强制接管)"
-        echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" 
-        echo " 1. 启动 / 重新启动"
-        echo " 2. 卸载代理"
-        echo " 3. 查看配置"
-        echo " 4. 实时查看日志 (排障必备)"
-        echo " 5. 手动绑定 IP (当前: $LOCAL_IP)"
-        echo " 0. 退出"
-        echo "------------------------------------------------"
-        pgrep -f "gost -C" > /dev/null && echo -e "状态: \033[32m🟢 运行中\033[0m" || echo -e "状态: \033[31m🔴 已停止\033[0m"
-        echo "------------------------------------------------"
-        read -p "请输入选项 [0-5]:" Input
-        case "$Input" in     
-            1) gvinstall ;;
-            2) pkill -f "gost -C" 2>/dev/null; rm -f "$BIN_FILE" "$CONF_FILE" "$LOG_FILE" "$PREF_FILE" ;;
-            3) [ -f "$CONF_FILE" ] && cat "$CONF_FILE" || echo "未安装"; sleep 5 ;;
-            4) tail -f "$LOG_FILE" ;;
-            5) read -p "输入真实IP: " ip; BIND_IP=$([ "$ip" == "auto" ] && echo "" || echo "$ip"); echo "BIND_IP=\"$BIND_IP\"" > "$PREF_FILE";;
-            0) exit 0 ;;
-        esac
-    done
+stop_proxy() {
+    screen -S gost_proxy -X quit 2>/dev/null
+    screen -S sub_server -X quit 2>/dev/null
+    echo -e "${GREEN}✓ 所有相关进程已停止。${NC}"
+    sleep 1
 }
 
-show_menu
-            1) gvinstall ;;
-            2) pkill -f "gost -C" 2>/dev/null; rm -f "$BIN_FILE" "$CONF_FILE" "$LOG_FILE" "$PREF_FILE"; echo "已卸载"; sleep 1 ;;
-            3) [ -f "$CONF_FILE" ] && cat "$CONF_FILE" || echo "未配置"; sleep 5 ;;
-            4) tail -f "$LOG_FILE" ;;
-            5) read -p "输入真实IP: " ip; BIND_IP=$([ "$ip" == "auto" ] && echo "" || echo "$ip"); echo "BIND_IP=\"$BIND_IP\"" > "$PREF_FILE";;
-            0) exit 0 ;;
-        esac
-    done
-}
-
-show_menu
-        tar zxvf gost.tar.gz
-        [ -d "gost_3.0.0_linux_arm64" ] && mv gost_3.0.0_linux_arm64/gost "$BIN_FILE"
-        chmod +x "$BIN_FILE"
-        rm -rf gost.tar.gz README* LICENSE* gost_3.0.0_linux_arm64/
+show_info() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+         echo -e "${RED}尚未配置代理服务！${NC}"
+         read -n 1 -s -r -p "按任意键返回..."
+         return
     fi
-
-    get_ip
-    echo "当前绑定 IP: $LOCAL_IP"
-    read -p "设置 Socks5 端口 [$PORT_SOCKS]: " s_p
-    PORT_SOCKS=${s_p:-$PORT_SOCKS}
-    read -p "设置 Http 端口 [$PORT_HTTP]: " h_p
-    PORT_HTTP=${h_p:-$PORT_HTTP}
-
-    echo "PORT_SOCKS=$PORT_SOCKS" > "$PREF_FILE"
-    echo "PORT_HTTP=$PORT_HTTP" >> "$PREF_FILE"
-    echo "BIND_IP=\"$BIND_IP\"" >> "$PREF_FILE"
-
-    generate_json_config
-
-    pkill -f "gost -C" 2>/dev/null
-    # 启动前强制清理一遍 screen
-    screen -wipe >/dev/null 2>&1
-    nohup "$BIN_FILE" -C "$CONF_FILE" > "$LOG_FILE" 2>&1 &
     
-    echo "[+] 代理已尝试在 VPN 内部启动。"
-    sleep 2
+    local lan_ip=$(get_lan_ip)
+    local s_port=$(grep -A 1 'name: service-socks5' "$CONFIG_FILE" | grep 'addr:' | cut -d':' -f3 | tr -d '"')
+    local h_port=$(grep -A 1 'name: service-http' "$CONFIG_FILE" | grep 'addr:' | cut -d':' -f3 | tr -d '"')
+    
+    clear
+    echo "================ 局域网代理信息 ================"
+    echo -e "设备内网 IP : ${GREEN}$lan_ip${NC} (请确保客户端在同一 Wi-Fi 下)"
+    echo -e "Socks5 端口 : ${GREEN}$s_port${NC}"
+    echo -e "HTTP 端口   : ${GREEN}$h_port${NC}"
+    echo "================================================"
+    
+    echo -e "\n${YELLOW}[方案A] Hiddify 一键订阅分发${NC}"
+    echo "在 Hiddify 添加订阅链接即可自动导入并更新："
+    echo -e "${BLUE}http://$lan_ip:$SUB_PORT/sub.txt${NC}"
+    
+    echo -e "\n${YELLOW}[方案B] Loon 配置语法输出 (手动复制)${NC}"
+    echo "[Proxy]"
+    echo "LAN_Socks5 = socks5, $lan_ip, $s_port, fast-open=false, udp=true"
+    echo "LAN_HTTP = http, $lan_ip, $h_port, fast-open=false, udp=true"
+    echo "================================================"
+    echo
+    read -n 1 -s -r -p "按任意键返回菜单..."
 }
 
-show_menu(){
+show_logs() {
+    if [ ! -f "$LOG_FILE" ]; then
+        echo -e "${RED}暂无日志文件。${NC}"
+    else
+        echo -e "${GREEN}正在实时追踪日志 (按 Ctrl+C 退出)...${NC}"
+        tail -f "$LOG_FILE"
+    fi
+    read -n 1 -s -r -p "按任意键返回..."
+}
+
+# ================= TUI 交互式菜单 =================
+main_menu() {
+    check_dependencies
+    
     while true; do
-        get_ip
         clear
-        echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" 
-        echo "Google_VPN局域网共享代理 (单一出口架构)"
-        echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" 
-        echo " 1. 启动 / 重新启动代理"
-        echo " 2. 卸载代理"
-        echo " 3. 查看当前配置"
-        echo " 4. 实时查看日志"
-        echo " 5. 绑定局域网 IP (当前: $LOCAL_IP)"
-        echo " 0. 退出控制台"
-        echo "------------------------------------------------"
-        pgrep -f "gost -C" > /dev/null && echo -e "状态: \033[32m🟢 运行中\033[0m" || echo -e "状态: \033[31m🔴 已停止\033[0m"
-        echo "------------------------------------------------"
-        read -p "请输入选项 [0-5]:" Input
-        case "$Input" in     
-            1) gvinstall ;;
-            2) pkill -f "gost -C" 2>/dev/null; rm -f "$BIN_FILE" "$CONF_FILE" "$LOG_FILE" "$PREF_FILE"; echo "卸载完成"; sleep 1 ;;
-            3) [ -f "$CONF_FILE" ] && cat "$CONF_FILE" || echo "未配置"; sleep 5 ;;
-            4) tail -f "$LOG_FILE" ;;
-            5) read -p "输入真实IP: " ip; BIND_IP=$([ "$ip" == "auto" ] && echo "" || echo "$ip"); echo "BIND_IP=\"$BIND_IP\"" > "$PREF_FILE";;
-            0) exit 0 ;;
+        echo -e "${BLUE}==============================================${NC}"
+        echo -e " ${GREEN}局域网 VPN 共享高级控制台 (TUI)${NC}"
+        echo -e "${BLUE}==============================================${NC}"
+        
+        # 检测运行状态
+        if screen -list | grep -q "gost_proxy"; then
+            echo -e " 当前状态: ${GREEN}▶ 运行中${NC}"
+        else
+            echo -e " 当前状态: ${RED}■ 已停止${NC}"
+        fi
+        echo -e "${BLUE}----------------------------------------------${NC}"
+        
+        echo " [1] 启动/重启共享代理"
+        echo " [2] 停止共享代理"
+        echo " [3] 查看内网 IP 与客户端配置 (Loon/Hiddify)"
+        echo " [4] 重新配置端口号"
+        echo " [5] 实时查看运行日志"
+        echo " [0] 退出脚本"
+        echo -e "${BLUE}----------------------------------------------${NC}"
+        
+        read -p "请输入对应的数字选项: " choice
+        
+        case $choice in
+            1) start_proxy ;;
+            2) stop_proxy ;;
+            3) show_info ;;
+            4) generate_config; start_proxy ;;
+            5) show_logs ;;
+            0) echo "已退出。"; exit 0 ;;
+            *) echo -e "${RED}无效输入，请输入正确的数字！${NC}"; sleep 1 ;;
         esac
     done
 }
 
-show_menu
+# 启动主函数
+main_menu
