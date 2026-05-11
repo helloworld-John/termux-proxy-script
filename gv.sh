@@ -1,20 +1,17 @@
 #!/bin/bash
 # ==========================================
-# Google_VPN 局域网共享代理 (Gost v3 端口修正版)
+# Google_VPN 局域网共享代理 (DNS 强化版)
 # ==========================================
 
-# --- 全局路径与变量 ---
 BIN_FILE="$HOME/gost"
 CONF_FILE="$HOME/config.json"
 LOG_FILE="$HOME/gost_proxy.log"
 PREF_FILE="$HOME/.proxy_pref.conf"
 
-# 默认配置 (已修正：端口必须小于 65535)
 PORT_SOCKS=10800
 PORT_HTTP=18080
 BIND_IP=""
 
-# 加载本地保存的配置
 [ -f "$PREF_FILE" ] && source "$PREF_FILE"
 
 get_ip() {
@@ -44,36 +41,56 @@ gvinstall(){
     read -p "设置 Http 端口 [$PORT_HTTP]: " h_p
     PORT_HTTP=${h_p:-$PORT_HTTP}
 
-    # 保存偏好
     echo "PORT_SOCKS=$PORT_SOCKS" > "$PREF_FILE"
     echo "PORT_HTTP=$PORT_HTTP" >> "$PREF_FILE"
     echo "BIND_IP=\"$BIND_IP\"" >> "$PREF_FILE"
 
-    # 生成 JSON 配置
+    # 核心修复：将 resolver 强制绑定到 handler，并改用 8.8.8.8
     cat > "$CONF_FILE" <<EOF
 {
   "services": [
     {
       "name": "service-socks5",
       "addr": "${LOCAL_IP}:${PORT_SOCKS}",
-      "handler": {"type": "socks5", "metadata": {"udp": true}},
+      "handler": {
+        "type": "socks5",
+        "metadata": {"udp": true},
+        "resolver": "resolver-0"
+      },
       "listener": {"type": "tcp"}
     },
     {
       "name": "service-http",
       "addr": "${LOCAL_IP}:${PORT_HTTP}",
-      "handler": {"type": "http"},
+      "handler": {
+        "type": "http",
+        "resolver": "resolver-0"
+      },
       "listener": {"type": "tcp"}
+    }
+  ],
+  "resolvers": [
+    {
+      "name": "resolver-0",
+      "nameservers": [
+        {
+          "addr": "8.8.8.8:53",
+          "ttl": "60s"
+        },
+        {
+          "addr": "8.8.4.4:53",
+          "ttl": "60s"
+        }
+      ]
     }
   ]
 }
 EOF
 
-    # 清理并启动
     pkill -f "gost -C" 2>/dev/null
     nohup "$BIN_FILE" -C "$CONF_FILE" > "$LOG_FILE" 2>&1 &
     
-    echo "安装并尝试启动完毕！"
+    echo "启动命令已发出，请按 4 观察日志是否不再报错。"
     sleep 2
 }
 
@@ -87,15 +104,11 @@ uninstall(){
 change_ip(){
     echo "当前绑定 IP: ${BIND_IP:-自动获取}"
     read -p "请输入真实局域网 IP (输入 auto 恢复自动): " input_ip
-    if [ "$input_ip" == "auto" ]; then
-        BIND_IP=""
-    else
-        BIND_IP="$input_ip"
-    fi
+    BIND_IP=$([ "$input_ip" == "auto" ] && echo "" || echo "$input_ip")
     echo "BIND_IP=\"$BIND_IP\"" > "$PREF_FILE"
     echo "PORT_SOCKS=$PORT_SOCKS" >> "$PREF_FILE"
     echo "PORT_HTTP=$PORT_HTTP" >> "$PREF_FILE"
-    echo "设置成功，请按 1 启动生效。"
+    echo "设置成功，请按 1 重启生效。"
     sleep 2
 }
 
@@ -104,7 +117,7 @@ show_menu(){
         get_ip
         clear
         echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" 
-        echo "Google_VPN局域网共享代理 (Gost v3 终极版)"
+        echo "Google_VPN局域网共享代理 (DNS 修复版)"
         echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" 
         echo " 1. 启动 / 重新启动代理"
         echo " 2. 卸载代理"
@@ -113,11 +126,7 @@ show_menu(){
         echo " 5. 绑定局域网 IP (当前: $LOCAL_IP)"
         echo " 0. 退出"
         echo "------------------------------------------------"
-        if pgrep -f "gost -C" > /dev/null; then
-            echo -e "状态: \033[32m🟢 运行中\033[0m"
-        else
-            echo -e "状态: \033[31m🔴 已停止 (请检查端口或IP)\033[0m"
-        fi
+        pgrep -f "gost -C" > /dev/null && echo -e "状态: \033[32m🟢 运行中\033[0m" || echo -e "状态: \033[31m🔴 已停止\033[0m"
         echo "------------------------------------------------"
         read -p "请输入数字:" Input
         case "$Input" in     
