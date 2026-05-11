@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==========================================
-# Termux 局域网共享代理管理脚本 (JSON 配置 + 强制退出版)
+# Termux 局域网共享代理管理脚本 (JSON 配置版)
 # ==========================================
 
 # --- 1. 全局变量与配置持久化 ---
@@ -59,6 +59,7 @@ install_gost() {
     return 0
 }
 
+# 核心修复：改为生成标准的 JSON 配置文件
 generate_json_config() {
     get_local_ip
     cat > "$CONF_FILE" <<EOF
@@ -232,22 +233,19 @@ show_menu() {
         echo -e "  [5] ⚙️  绑定真实 IP 与端口 (必须配置)"
         echo -e "  [0] 🚪 退出菜单"
         echo -e "========================================="
-        
-        # 提示语中增加了明确的 exit 提示
-        read -p "请输入选项数字，或输入 exit 强制退出: " choice
+        read -p "请输入选项 [0-5]: " choice
 
-        # 使用匹配模式处理各种可能的退出指令
         case $choice in
             1) start_proxy ;;
             2) stop_proxy ;;
             3) show_config ;;
             4) view_logs ;;
             5) change_config ;;
-            0 | "exit" | "EXIT" | "q" | "quit") 
-                echo -e "\n已安全退出控制台 (后台代理进程不受影响)。"
+            0) 
+                echo -e "\n已退出控制台 (代理运行状态不受影响)。"
                 running=0
                 ;;
-            *) echo -e "\n[!] 输入无效，请重试。" ;;
+            *) echo -e "\n[!] 输入无效。" ;;
         esac
     done
     exit 0
