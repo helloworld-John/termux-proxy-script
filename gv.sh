@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==========================================
-# Termux 局域网共享代理管理脚本 (JSON 配置版)
+# Termux 局域网共享代理管理脚本 (JSON 终极修复版)
 # ==========================================
 
 # --- 1. 全局变量与配置持久化 ---
@@ -59,7 +59,7 @@ install_gost() {
     return 0
 }
 
-# 核心修复：改为生成标准的 JSON 配置文件
+# 核心修复：生成标准的 JSON 配置文件
 generate_json_config() {
     get_local_ip
     cat > "$CONF_FILE" <<EOF
@@ -128,7 +128,7 @@ start_proxy() {
     pkill -f "gost -C" 2>/dev/null
     sleep 1
     
-    echo -e "\n[*] 正在生成配置并启动代理..."
+    echo -e "\n[*] 正在生成 JSON 配置并启动代理..."
     generate_json_config
     
     if [ "$LOCAL_IP" == "127.0.0.1" ]; then
@@ -211,12 +211,11 @@ view_logs() {
     return 0
 }
 
-# --- 3. 交互式主菜单路由 (严格单一出口) ---
 show_menu() {
     local running=1
     while [ $running -eq 1 ]; do
         echo -e "\n========================================="
-        echo -e "    Termux 代理控制台 (Gost v3 终极修复版)"
+        echo -e "    Termux 代理控制台 (Gost v3 JSON版)"
         echo -e "========================================="
         
         if pgrep -f "gost -C" > /dev/null; then
@@ -242,7 +241,7 @@ show_menu() {
             4) view_logs ;;
             5) change_config ;;
             0) 
-                echo -e "\n已退出控制台 (代理运行状态不受影响)。"
+                echo -e "\n已退出控制台。"
                 running=0
                 ;;
             *) echo -e "\n[!] 输入无效。" ;;
@@ -251,5 +250,4 @@ show_menu() {
     exit 0
 }
 
-# --- 4. 脚本入口 ---
 show_menu
