@@ -1,253 +1,140 @@
 #!/bin/bash
 # ==========================================
-# Termux 局域网共享代理管理脚本 (JSON 终极修复版)
+# Google_VPN 局域网共享代理 (Gost v3 JSON 修复版)
 # ==========================================
 
-# --- 1. 全局变量与配置持久化 ---
-GOST_VERSION="3.0.0"
-BIN_DIR="$PREFIX/bin"
-CONF_FILE="$HOME/gost_config.json" 
+# --- 全局路径与变量 ---
+BIN_FILE="$HOME/gost"
+CONF_FILE="$HOME/config.json"
 LOG_FILE="$HOME/gost_proxy.log"
-USER_PREF_FILE="$HOME/.gost_ports.conf"
+PREF_FILE="$HOME/.proxy_pref.conf"
 
+# 默认配置
 PORT_SOCKS=10800
 PORT_HTTP=80800
-LOCAL_IP_OVERRIDE=""
+BIND_IP=""
 
-if [ -f "$USER_PREF_FILE" ]; then
-    source "$USER_PREF_FILE"
-fi
+# 加载本地保存的配置
+[ -f "$PREF_FILE" ] && source "$PREF_FILE"
 
-# --- 2. 核心功能函数 ---
-
-get_local_ip() {
-    if [ -n "$LOCAL_IP_OVERRIDE" ]; then
-        LOCAL_IP="$LOCAL_IP_OVERRIDE"
-        return
-    fi
-    LOCAL_IP=$(ifconfig wlan0 2>/dev/null | grep -w 'inet' | awk '{print $2}')
-    if [ -z "$LOCAL_IP" ]; then
-        LOCAL_IP="127.0.0.1"
+# 获取局域网 IP 函数
+get_ip() {
+    if [ -n "$BIND_IP" ]; then
+        LOCAL_IP="$BIND_IP"
+    else
+        # 尝试自动获取 wlan0 IP
+        LOCAL_IP=$(ifconfig wlan0 2>/dev/null | grep -w 'inet' | awk '{print $2}')
+        [ -z "$LOCAL_IP" ] && LOCAL_IP="127.0.0.1"
     fi
 }
 
-install_gost() {
-    if [ ! -f "$BIN_DIR/gost" ]; then
-        echo -e "\n[*] 未检测到 gost v3 核心，正在下载..."
-        pkg update -y -q
-        pkg install -y wget tar inetutils -q 
-        
-        DOWNLOAD_URL="https://gh-proxy.com/https://raw.githubusercontent.com/yonggekkk/google_vpn_proxy/main/gost_3.0.0_linux_arm64.tar.gz"
-        wget -qO gost.tar.gz "$DOWNLOAD_URL"
-        
-        if [ -s gost.tar.gz ]; then
-            tar -xzf gost.tar.gz
-            if [ -f "gost_3.0.0_linux_arm64/gost" ]; then
-                mv "gost_3.0.0_linux_arm64/gost" "$BIN_DIR/gost"
-            else
-                mv gost "$BIN_DIR/gost"
-            fi
-            chmod +x "$BIN_DIR/gost"
-            rm -rf gost.tar.gz README* LICENSE* gost_3.0.0_linux_arm64/
-            echo "[+] Gost v3 核心安装完毕！"
-        else
-            echo "[!] 下载失败，请检查网络！"
-            rm -f gost.tar.gz
-            return 1
-        fi
+gvinstall(){
+    pkg install -y screen wget net-tools
+    if [ ! -e "$BIN_FILE" ]; then
+        echo "核心下载中……"
+        curl -L -o gost.tar.gz -# --retry 2 --insecure https://gh-proxy.com/https://raw.githubusercontent.com/yonggekkk/google_vpn_proxy/main/gost_3.0.0_linux_arm64.tar.gz
+        tar zxvf gost.tar.gz
+        [ -d "gost_3.0.0_linux_arm64" ] && mv gost_3.0.0_linux_arm64/gost "$BIN_FILE"
+        chmod +x "$BIN_FILE"
+        rm -rf gost.tar.gz README* LICENSE* gost_3.0.0_linux_arm64/
     fi
-    return 0
-}
 
-# 核心修复：生成标准的 JSON 配置文件
-generate_json_config() {
-    get_local_ip
+    if [ ! -f "$BIN_FILE" ]; then echo "安装失败！" && return; fi
+
+    get_ip
+    echo "当前检测/绑定 IP: $LOCAL_IP"
+    read -p "设置 Socks5 端口 [$PORT_SOCKS]: " s_p
+    PORT_SOCKS=${s_p:-$PORT_SOCKS}
+    read -p "设置 Http 端口 [$PORT_HTTP]: " h_p
+    PORT_HTTP=${h_p:-$PORT_HTTP}
+
+    # 保存配置
+    echo "PORT_SOCKS=$PORT_SOCKS" > "$PREF_FILE"
+    echo "PORT_HTTP=$PORT_HTTP" >> "$PREF_FILE"
+    echo "BIND_IP=\"$BIND_IP\"" >> "$PREF_FILE"
+
+    # 生成 JSON 配置 (修复 invalid character 's' 错误)
     cat > "$CONF_FILE" <<EOF
 {
   "services": [
     {
       "name": "service-socks5",
       "addr": "${LOCAL_IP}:${PORT_SOCKS}",
-      "resolver": "resolver-0",
-      "handler": {
-        "type": "socks5",
-        "metadata": {
-          "udp": true,
-          "udpbuffersize": 4096
-        }
-      },
-      "listener": {
-        "type": "tcp"
-      }
+      "handler": {"type": "socks5", "metadata": {"udp": true}},
+      "listener": {"type": "tcp"}
     },
     {
       "name": "service-http",
       "addr": "${LOCAL_IP}:${PORT_HTTP}",
-      "resolver": "resolver-0",
-      "handler": {
-        "type": "http",
-        "metadata": {
-          "udp": true,
-          "udpbuffersize": 4096
-        }
-      },
-      "listener": {
-        "type": "tcp"
-      }
-    }
-  ],
-  "resolvers": [
-    {
-      "name": "resolver-0",
-      "nameservers": [
-        {
-          "addr": "tls://8.8.8.8:853",
-          "prefer": "ipv4",
-          "ttl": "5m0s",
-          "async": true
-        },
-        {
-          "addr": "tls://8.8.4.4:853",
-          "prefer": "ipv4",
-          "ttl": "5m0s",
-          "async": true
-        }
-      ]
+      "handler": {"type": "http"},
+      "listener": {"type": "tcp"}
     }
   ]
 }
 EOF
+
+    # 启动代理
+    screen -ls | grep Detached | cut -d. -f1 | awk '{print $1}' | xargs -r kill 2>/dev/null
+    nohup "$BIN_FILE" -C "$CONF_FILE" > "$LOG_FILE" 2>&1 &
+    
+    echo "安装并启动完毕！"
+    sleep 2
 }
 
-start_proxy() {
-    install_gost
-    if [ $? -ne 0 ]; then
-        return 1
-    fi
-    
+uninstall(){
     pkill -f "gost -C" 2>/dev/null
-    sleep 1
-    
-    echo -e "\n[*] 正在生成 JSON 配置并启动代理..."
-    generate_json_config
-    
-    if [ "$LOCAL_IP" == "127.0.0.1" ]; then
-        echo -e "\n\033[31m[错误] 当前获取到的 IP 为 127.0.0.1，局域网共享必将失败！\033[0m"
-        echo -e "请在主菜单按 [5] 手动绑定您手机在 Wi-Fi 下的真实 IP！"
-        return 1
-    fi
-    
-    nohup gost -C "$CONF_FILE" > "$LOG_FILE" 2>&1 &
-    sleep 1
-    echo "[+] 代理已在后台基于真实 IP 稳定运行！"
-    return 0
+    rm -f "$BIN_FILE" "$CONF_FILE" "$LOG_FILE" "$PREF_FILE"
+    echo "卸载完毕"
+    sleep 2
 }
 
-stop_proxy() {
-    pkill -f "gost -C" 2>/dev/null
-    echo -e "\n[!] 已彻底停止代理进程。"
-    return 0
-}
-
-change_config() {
-    echo -e "\n========================================="
-    echo -e "           ⚙️ 修改网络配置"
-    echo -e "========================================="
-    
-    echo -e "当前绑定的局域网 IP: \033[32m${LOCAL_IP_OVERRIDE:-自动获取(如为127.0.0.1请务必手动绑定)}\033[0m"
-    read -p "请输入真实 IP (回车保持不变，输入 auto 恢复自动): " new_ip
-    if [ "$new_ip" == "auto" ]; then
-        LOCAL_IP_OVERRIDE=""
-    elif [ -n "$new_ip" ]; then
-        LOCAL_IP_OVERRIDE=$new_ip
+change_ip(){
+    echo "当前绑定 IP: ${BIND_IP:-自动获取}"
+    read -p "请输入手机 Wi-Fi 详情里的真实 IP (输入 auto 恢复自动): " input_ip
+    if [ "$input_ip" == "auto" ]; then
+        BIND_IP=""
+    else
+        BIND_IP="$input_ip"
     fi
-
-    echo -e "\n当前 SOCKS5 端口: \033[32m$PORT_SOCKS\033[0m"
-    read -p "请输入新的 SOCKS5 端口 (直接回车保持不变): " new_socks
-    if [ -n "$new_socks" ] && [[ "$new_socks" =~ ^[0-9]+$ ]]; then
-        PORT_SOCKS=$new_socks
-    fi
-
-    echo -e "当前 HTTP 端口: \033[32m$PORT_HTTP\033[0m"
-    read -p "请输入新的 HTTP 端口 (直接回车保持不变): " new_http
-    if [ -n "$new_http" ] && [[ "$new_http" =~ ^[0-9]+$ ]]; then
-        PORT_HTTP=$new_http
-    fi
-
-    echo "PORT_SOCKS=$PORT_SOCKS" > "$USER_PREF_FILE"
+    echo "BIND_IP=\"$BIND_IP\"" > "$PREF_FILE"
+    echo "PORT_SOCKS=$PORT_SOCKS" >> "$USER_PREF_FILE"
     echo "PORT_HTTP=$PORT_HTTP" >> "$USER_PREF_FILE"
-    echo "LOCAL_IP_OVERRIDE=\"$LOCAL_IP_OVERRIDE\"" >> "$USER_PREF_FILE"
-    echo -e "\n[+] 配置已保存！"
-
-    if pgrep -f "gost -C" > /dev/null; then
-        echo "[*] 检测到代理运行中，正在重启以应用新配置..."
-        stop_proxy
-        start_proxy
-    fi
-    return 0
+    echo "IP 绑定成功，请按 1 重新安装/启动以生效。"
+    sleep 2
 }
 
-show_config() {
-    get_local_ip
-    echo -e "\n========================================="
-    if [ "$LOCAL_IP" == "127.0.0.1" ]; then
-        echo -e "⚠️ \033[31m严重警告: IP 为 127.0.0.1，请按 5 绑定真实 IP\033[0m"
-    else
-        echo -e "【真实局域网 IP】: \033[32m$LOCAL_IP\033[0m  <-- 请填入 v2rayNG"
-    fi
-    echo -e "【SOCKS5 端口 】: $PORT_SOCKS"
-    echo -e "【HTTP   端口 】: $PORT_HTTP"
-    echo -e "========================================="
-    return 0
-}
-
-view_logs() {
-    if [ -f "$LOG_FILE" ]; then
-        echo -e "\n--- 实时运行日志 (按 Ctrl+C 退出) ---"
-        tail -f "$LOG_FILE"
-    else
-        echo -e "\n[!] 暂无日志文件，请先启动服务。"
-    fi
-    return 0
-}
-
-show_menu() {
-    local running=1
-    while [ $running -eq 1 ]; do
-        echo -e "\n========================================="
-        echo -e "    Termux 代理控制台 (Gost v3 JSON版)"
-        echo -e "========================================="
-        
+show_menu(){
+    while true; do
+        get_ip
+        clear
+        echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" 
+        echo "Google_VPN局域网共享代理 (Gost v3 JSON修复版)"
+        echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" 
+        echo " 1. 安装 / 启动代理"
+        echo " 2. 卸载代理"
+        echo " 3. 查看当前配置"
+        echo " 4. 实时查看日志 (排障)"
+        echo " 5. 手动绑定本机局域网 IP (解决连接失败)"
+        echo " 0. 退出"
+        echo "------------------------------------------------"
         if pgrep -f "gost -C" > /dev/null; then
-            echo -e "  状态: [\033[32m🟢 运行中\033[0m]"
+            echo -e "状态: \033[32m🟢 运行中\033[0m"
+            echo "IP: $LOCAL_IP | Socks5: $PORT_SOCKS | Http: $PORT_HTTP"
         else
-            echo -e "  状态: [\033[31m🔴 已停止\033[0m]"
+            echo -e "状态: \033[31m🔴 已停止\033[0m"
         fi
-        
-        echo -e "-----------------------------------------"
-        echo -e "  [1] 🚀 启动 / 重启代理"
-        echo -e "  [2] ⏹️  停止代理"
-        echo -e "  [3] 📋 查看配置参数"
-        echo -e "  [4] 📄 实时查看日志 (排障专用)"
-        echo -e "  [5] ⚙️  绑定真实 IP 与端口 (必须配置)"
-        echo -e "  [0] 🚪 退出菜单"
-        echo -e "========================================="
-        read -p "请输入选项 [0-5]: " choice
-
-        case $choice in
-            1) start_proxy ;;
-            2) stop_proxy ;;
-            3) show_config ;;
-            4) view_logs ;;
-            5) change_config ;;
-            0) 
-                echo -e "\n已退出控制台。"
-                running=0
-                ;;
-            *) echo -e "\n[!] 输入无效。" ;;
+        echo "------------------------------------------------"
+        read -p "请输入数字:" Input
+        case "$Input" in     
+            1) gvinstall ;;
+            2) uninstall ;;
+            3) [ -f "$CONF_FILE" ] && cat "$CONF_FILE" || echo "未安装"; sleep 5 ;;
+            4) tail -f "$LOG_FILE" ;;
+            5) change_ip ;;
+            0) exit ;;
+            *) echo "无效输入" ;;
         esac
     done
-    exit 0
 }
 
 show_menu
