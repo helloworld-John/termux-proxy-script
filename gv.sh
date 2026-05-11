@@ -1,8 +1,9 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # ============================================================
 #  局域网共享代理管理面板
-#  依赖: gost (https://github.com/go-gost/gost)
-#  用法: bash ~/gv.sh
+#  依赖: gost  （选 1 启动时若未安装会自动安装）
+#  用法: gv              ← 任意目录直接敲这三个字母
+#        bash ~/gv.sh   ← 或完整路径
 # ============================================================
 
 # ---------- 颜色定义 ----------
@@ -21,13 +22,31 @@ CONFIG_FILE="$HOME/.gv_config"
 PID_FILE="$HOME/.gv_proxy.pid"
 LOG_FILE="$HOME/.gv_proxy.log"
 SELF_PATH="$HOME/gv.sh"
+# Termux 的可执行目录（在 PATH 中），写入后直接敲 gv 就能启动
+LAUNCHER_BIN="${PREFIX:-/data/data/com.termux/files/usr}/bin/gv"
 
 # ---------- 工具函数 ----------
 
-# 写出自身到 $HOME/gv.sh，保证随用随启
+# 将脚本固化到 ~/gv.sh，并在 PREFIX/bin/gv 放一个极简入口
+# 这样无论从哪里、用任何方式调用，`gv` 都稳定生效
 _write_launcher() {
-    cp -f "$0" "$SELF_PATH" 2>/dev/null || true
-    chmod +x "$SELF_PATH" 2>/dev/null || true
+    # 1. 获取本脚本的真实磁盘路径（BASH_SOURCE[0] 比 $0 可靠得多）
+    local real_path
+    real_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null)"
+
+    # 2. 若路径有效且不是已有的目标文件，则同步到 ~/gv.sh
+    if [[ -f "$real_path" && "$real_path" != "$SELF_PATH" ]]; then
+        cp -f "$real_path" "$SELF_PATH"
+        chmod +x "$SELF_PATH"
+    fi
+
+    # 3. 在 PREFIX/bin 写一个极简启动器（内容永远固定，不依赖 $0）
+    #    只要 ~/gv.sh 存在，`gv` 就能唤出面板
+    cat > "$LAUNCHER_BIN" 2>/dev/null << 'LAUNCHER_EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+exec bash "$HOME/gv.sh" "$@"
+LAUNCHER_EOF
+    chmod +x "$LAUNCHER_BIN" 2>/dev/null || true
 }
 
 # 从 ifconfig 暴力扫描局域网 IP（只认 192.168 / 10. / 172.16-31）
@@ -79,13 +98,31 @@ _valid_port() {
     [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1024 && p <= 65535 ))
 }
 
-# ---------- 检查 gost ----------
+# ---------- 检查 / 自动安装 gost ----------
 _check_gost() {
-    if [[ -z "$GOST_BIN" ]]; then
-        echo -e "${C_RED}[错误] 未找到 gost，请先安装：${C_RESET}"
-        echo -e "  pkg install gost  ${C_DIM}# 或从官方 Release 手动放入 PATH${C_RESET}"
-        return 1
+    # 每次调用时重新检测，避免安装后 GOST_BIN 仍为空
+    GOST_BIN="$(which gost 2>/dev/null)"
+    if [[ -n "$GOST_BIN" ]]; then
+        return 0
     fi
+
+    echo -e "${C_YELLOW}未检测到 gost，正在自动安装...${C_RESET}"
+    echo -e "${C_DIM}执行：pkg install gost -y${C_RESET}\n"
+
+    if pkg install gost -y; then
+        GOST_BIN="$(which gost 2>/dev/null)"
+        if [[ -n "$GOST_BIN" ]]; then
+            echo -e "\n${C_GREEN}[✓] gost 安装成功！${C_RESET}"
+            sleep 0.5
+            return 0
+        fi
+    fi
+
+    # 安装失败兜底提示
+    echo -e "\n${C_RED}[✗] 自动安装失败，请手动执行：${C_RESET}"
+    echo -e "    pkg install gost"
+    echo -e "    ${C_DIM}（或从 https://github.com/go-gost/gost/releases 下载并放入 PATH）${C_RESET}"
+    return 1
 }
 
 # ---------- 进程状态 ----------
@@ -264,7 +301,7 @@ _draw_panel() {
     fi
 
     echo -e "${C_BOLD}${C_WHITE}╠══════════════════════════════════════════════╣${C_RESET}"
-    echo -e "${C_WHITE}║${C_RESET}  ${C_BOLD}快捷重启：${C_RESET}${C_DIM}bash ~/gv.sh${C_RESET}"
+    echo -e "${C_WHITE}║${C_RESET}  ${C_BOLD}快捷启动：${C_RESET}直接输入 ${C_CYAN}gv${C_RESET} 即可（任意目录）"
     echo -e "${C_BOLD}${C_WHITE}╠══════════════════════════════════════════════╣${C_RESET}"
     echo -e "${C_WHITE}║${C_RESET}  ${C_GREEN}1${C_RESET}. 启动 / 重新启动代理"
     echo -e "${C_WHITE}║${C_RESET}  ${C_YELLOW}2${C_RESET}. 卸载代理（停止并清除配置）"
@@ -343,7 +380,7 @@ main() {
                 ;;
             0)
                 echo -e "${C_DIM}已退出面板。代理进程继续在后台运行。${C_RESET}"
-                echo -e "${C_DIM}随时输入 bash ~/gv.sh 重新打开面板。${C_RESET}"
+                echo -e "${C_DIM}随时输入 ${C_RESET}${C_CYAN}gv${C_DIM} 重新打开面板。${C_RESET}"
                 echo ""
                 exit 0
                 ;;
