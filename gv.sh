@@ -5,7 +5,7 @@ GOST_DIR="$HOME/google_vpn_proxy"
 CONFIG_FILE="$GOST_DIR/config.yaml"
 GOST_BIN="$GOST_DIR/gost"
 SUB_DIR="$GOST_DIR/sub_server"
-SUB_PORT=8080
+SUB_PORT=8080  # 订阅分发端口
 LOG_FILE="$GOST_DIR/gost.log"
 
 # 颜色输出宏
@@ -17,15 +17,17 @@ NC='\033[0m' # No Color
 
 # ================= 核心依赖与安装 =================
 check_dependencies() {
-    local pkgs="screen python iproute2 coreutils curl"
+    # 移除了 Python，只保留最基础的系统工具
+    local pkgs="screen iproute2 coreutils curl"
     for pkg in $pkgs; do
         if ! command -v $pkg &> /dev/null; then
-            echo -e "${YELLOW}检测到缺少依赖: $pkg，正在安装...${NC}"
+            echo -e "${YELLOW}检测到缺少基础工具: $pkg，正在安装...${NC}"
             pkg install -y $pkg
         fi
     done
 
     mkdir -p "$GOST_DIR"
+    mkdir -p "$SUB_DIR" # 提前创建订阅目录，防止 Gost 启动报错
     cd "$GOST_DIR" || exit
 
     if [ ! -f "$GOST_BIN" ]; then
@@ -42,7 +44,7 @@ check_dependencies() {
 }
 
 # ================= 辅助函数 =================
-# 获取局域网 IP (Termux 通常使用 wlan0)
+# 获取局域网 IP
 get_lan_ip() {
     local ip
     ip=$(ip -4 addr show wlan0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
@@ -63,7 +65,6 @@ get_valid_port() {
         echo -ne "${BLUE}$prompt_text [默认: $default_port, 回车跳过]: ${NC}"
         read input_port
         
-        # 回车跳过则使用默认或随机
         if [ -z "$input_port" ]; then
             if [ -z "$default_port" ]; then
                 echo $(shuf -i 10000-65535 -n 1)
@@ -73,7 +74,6 @@ get_valid_port() {
             return
         fi
         
-        # 验证数字及范围
         if [[ "$input_port" =~ ^[0-9]+$ ]] && [ "$input_port" -ge 10000 ] && [ "$input_port" -le 65535 ]; then
             echo "$input_port"
             return
@@ -90,7 +90,7 @@ generate_config() {
     
     echo -e "${GREEN}正在生成 Gost 配置...${NC}"
     
-    # 写入 config.yaml (屏蔽部分冗长输出，逻辑不变)
+    # 巧妙利用 Gost 内置的 file handler 来充当 Web 服务器分发订阅
     cat <<EOF > "$CONFIG_FILE"
 services:
   - name: service-socks5
@@ -113,6 +113,14 @@ services:
         udpbuffersize: 4096
     listener:
       type: tcp
+  - name: service-sub
+    addr: ":$SUB_PORT"
+    handler:
+      type: file
+      metadata:
+        dir: "$SUB_DIR"
+    listener:
+      type: tcp
 resolvers:
   - name: resolver-0
     nameservers:
@@ -131,11 +139,10 @@ update_subscription() {
     local lan_ip=$(get_lan_ip)
     mkdir -p "$SUB_DIR"
     
-    # 从配置文件读取当前设定的端口
     local s_port=$(grep -A 1 'name: service-socks5' "$CONFIG_FILE" | grep 'addr:' | cut -d':' -f3 | tr -d '"')
     local h_port=$(grep -A 1 'name: service-http' "$CONFIG_FILE" | grep 'addr:' | cut -d':' -f3 | tr -d '"')
     
-    # 构建标准 URI scheme，并输出 Base64 到订阅文件
+    # 构建标准 URI scheme 并生成 Base64 到挂载目录
     cat <<EOF | base64 > "$SUB_DIR/sub.txt"
 socks5://$lan_ip:$s_port#LAN-Socks5
 http://$lan_ip:$h_port#LAN-HTTP
@@ -149,19 +156,17 @@ start_proxy() {
         generate_config
     fi
     
+    # 在启动前刷新最新的局域网 IP 到订阅文件
+    update_subscription
+    
     # 强制清理旧进程
     stop_proxy > /dev/null 2>&1
     
-    echo -e "${YELLOW}正在启动 Gost 与订阅服务器...${NC}"
+    echo -e "${YELLOW}正在启动核心服务...${NC}"
     cd "$GOST_DIR" || exit
     
-    # 启动 Gost
+    # 仅需启动 Gost 即可，它现在同时负责代理和订阅分发
     screen -dmS gost_proxy bash -c "./gost -C $CONFIG_FILE > $LOG_FILE 2>&1"
-    
-    # 启动订阅分发服务器
-    update_subscription
-    cd "$SUB_DIR" || exit
-    screen -dmS sub_server python -m http.server $SUB_PORT > /dev/null 2>&1
     
     echo -e "${GREEN}✓ 启动成功！${NC}"
     sleep 1
@@ -169,8 +174,7 @@ start_proxy() {
 
 stop_proxy() {
     screen -S gost_proxy -X quit 2>/dev/null
-    screen -S sub_server -X quit 2>/dev/null
-    echo -e "${GREEN}✓ 所有相关进程已停止。${NC}"
+    echo -e "${GREEN}✓ 服务已停止。${NC}"
     sleep 1
 }
 
@@ -192,11 +196,11 @@ show_info() {
     echo -e "HTTP 端口   : ${GREEN}$h_port${NC}"
     echo "================================================"
     
-    echo -e "\n${YELLOW}[方案A] Hiddify 一键订阅分发${NC}"
-    echo "在 Hiddify 添加订阅链接即可自动导入并更新："
+    echo -e "\n${YELLOW}[方案A] Hiddify / V2ray 一键订阅分发${NC}"
+    echo "在客户端添加以下订阅链接即可自动导入并更新："
     echo -e "${BLUE}http://$lan_ip:$SUB_PORT/sub.txt${NC}"
     
-    echo -e "\n${YELLOW}[方案B] Loon 配置语法输出 (手动复制)${NC}"
+    echo -e "\n${YELLOW}[方案B] Loon / Surge 配置语法 (手动复制)${NC}"
     echo "[Proxy]"
     echo "LAN_Socks5 = socks5, $lan_ip, $s_port, fast-open=false, udp=true"
     echo "LAN_HTTP = http, $lan_ip, $h_port, fast-open=false, udp=true"
@@ -222,10 +226,9 @@ main_menu() {
     while true; do
         clear
         echo -e "${BLUE}==============================================${NC}"
-        echo -e " ${GREEN}局域网 VPN 共享高级控制台 (TUI)${NC}"
+        echo -e " ${GREEN}局域网 VPN 共享高级控制台 (TUI) - 纯净版${NC}"
         echo -e "${BLUE}==============================================${NC}"
         
-        # 检测运行状态
         if screen -list | grep -q "gost_proxy"; then
             echo -e " 当前状态: ${GREEN}▶ 运行中${NC}"
         else
