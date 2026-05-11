@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==========================================
 # Local-Proxy-Hub 局域网共享代理 (Gost v3 通用版)
-# 特性：全网卡被动监听，随机可用端口，强力IP提取，全局快捷指令
+# 特性：全网卡被动监听，智能过滤局域网IP，随机端口，全局快捷指令
 # ==========================================
 
 # --- 全局路径与变量 ---
@@ -16,7 +16,6 @@ SHORTCUT_NAME="gv"
 
 # --- 暴力设置全局快捷指令 ---
 setup_shortcut() {
-    # 绝对定位当前脚本
     SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
     
     # 暴力判断存放环境 (优先 Termux 真实路径)
@@ -39,34 +38,34 @@ EOF
     fi
 }
 
-# --- 强力获取局域网 IP ---
+# --- 智能获取真实局域网 IP (过滤蜂窝网络) ---
 get_network_status() {
     DISPLAY_IP=""
-    NET_INFO=""
+    IP_WARNING=""
 
-    # 1. 尝试使用 ip 命令精准匹配 (最可靠)
-    DISPLAY_IP=$(ip -4 addr show wlan0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-    
-    # 2. 如果失败，尝试使用 ifconfig 匹配 (兼容老安卓，去除可能存在的 addr: 字符)
+    # 1. 第一优先级：强制寻找标准局域网网段 (192.168.x.x, 10.x.x.x, 172.16~31.x.x)
+    DISPLAY_IP=$(ip -4 addr show 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -E '^(192\.168|10\.|172\.(1[6-9]|2[0-9]|3[0-1]))\.' | head -n 1)
+
+    # 2. 第二优先级：如果没找到标准内网 IP，尝试抓取 WiFi (wlan) 或 热点 (ap/rndis)
     if [ -z "$DISPLAY_IP" ]; then
-        DISPLAY_IP=$(ifconfig wlan0 2>/dev/null | grep -i 'inet' | grep -v '127.0.0.1' | awk '{print $2}' | tr -d 'addr:')
-    fi
-    
-    # 3. 如果连 wlan0 都没有，尝试获取能上网的主路由 IP
-    if [ -z "$DISPLAY_IP" ]; then
-        DISPLAY_IP=$(ip -4 route get 8.8.8.8 2>/dev/null | grep -oP 'src \K\S+')
+        DISPLAY_IP=$(ip -4 addr show 2>/dev/null | grep -E 'wlan|ap|rndis|usb' -A 2 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
     fi
 
-    # 4. 兜底方案：随便找一个非本地环回的 IP
+    # 3. 兜底方案：抓取除了 127.0.0.1 以外的任何 IP
     if [ -z "$DISPLAY_IP" ]; then
-        DISPLAY_IP=$(ifconfig 2>/dev/null | grep -i 'inet' | grep -v '127.0.0.1' | head -n 1 | awk '{print $2}' | tr -d 'addr:')
+        DISPLAY_IP=$(ip -4 addr show 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n 1)
     fi
 
-    [ -z "$DISPLAY_IP" ] && DISPLAY_IP="未知 (请检查WIFI)"
+    [ -z "$DISPLAY_IP" ] && DISPLAY_IP="未获取到 IP (请检查WIFI)"
 
-    # 生成展示信息
-    NET_INFO=$(ifconfig wlan0 2>/dev/null | grep -i 'inet' | head -n 1)
-    [ -z "$NET_INFO" ] && NET_INFO="当前主IP: $DISPLAY_IP"
+    # --- 智能警告逻辑 ---
+    if [[ "$DISPLAY_IP" == 100.* ]]; then
+        IP_WARNING="\033[31m⚠️ 警告: 检测到运营商蜂窝IP ($DISPLAY_IP)，外部设备无法连接！请连上 WiFi 或开启个人热点。\033[0m"
+    fi
+
+    # 获取网卡详细信息用于展示
+    NET_INFO=$(ip -4 addr show 2>/dev/null | grep -w "inet $DISPLAY_IP" | awk '{print $2, $NF}' | head -n 1)
+    [ -z "$NET_INFO" ] && NET_INFO="未知网卡"
 }
 
 # --- 核心下载与安装 ---
@@ -105,17 +104,18 @@ setup_proxy(){
     install_core
 
     echo "------------------------------------------------"
-    echo "提示：直接回车将自动分配 10000-65535 之间的随机端口"
+    echo "提示：非 Root 权限必须使用 1024 以上的端口。"
+    echo "留空直接回车将自动分配 10000-65535 之间的随机端口"
     echo "------------------------------------------------"
     
-    read -p "设置 Socks5 端口 [当前: ${PORT_SOCKS:-无}]: " input_socks
+    read -p "设置 Socks5 端口 [范围: 1024-65535] (当前: ${PORT_SOCKS:-无}): " input_socks
     if [ -n "$input_socks" ]; then
         PORT_SOCKS=$input_socks
     elif [ -z "$PORT_SOCKS" ]; then
         PORT_SOCKS=$(shuf -i 10000-65535 -n 1)
     fi
 
-    read -p "设置 Http 端口 [当前: ${PORT_HTTP:-无}]: " input_http
+    read -p "设置 Http 端口 [范围: 1024-65535] (当前: ${PORT_HTTP:-无}): " input_http
     if [ -n "$input_http" ]; then
         PORT_HTTP=$input_http
     elif [ -z "$PORT_HTTP" ]; then
@@ -156,7 +156,6 @@ uninstall(){
     pkill -f "gost -C" 2>/dev/null
     rm -f "$BIN_FILE" "$CONF_FILE" "$LOG_FILE" "$PREF_FILE"
     
-    # 顺手删掉快捷指令
     if [ -d "/data/data/com.termux/files/usr/bin" ]; then
         rm -f "/data/data/com.termux/files/usr/bin/$SHORTCUT_NAME"
     fi
@@ -166,7 +165,6 @@ uninstall(){
 
 # --- 主菜单 ---
 show_menu(){
-    # 每次进入菜单自动修复快捷指令
     setup_shortcut
 
     while true; do
@@ -175,8 +173,11 @@ show_menu(){
         echo "================================================" 
         echo "        Local-Proxy-Hub 局域网代理服务          "
         echo "================================================" 
-        echo -e " 📡 \033[36m实时网卡状态 (ifconfig/ip):\033[0m"
-        echo -e "    $NET_INFO"
+        echo -e " 📡 \033[36m智能网卡捕获状态:\033[0m"
+        echo -e "    网络详情 : $NET_INFO"
+        if [ -n "$IP_WARNING" ]; then
+            echo -e "    $IP_WARNING"
+        fi
         echo "------------------------------------------------"
         echo " 1. 安装/配置/重启代理"
         echo " 2. 卸载代理"
@@ -188,7 +189,7 @@ show_menu(){
         if pgrep -f "gost -C" > /dev/null; then
             echo -e " 状态: \033[32m🟢 运行中\033[0m (0.0.0.0 全网卡被动监听)"
             echo "------------------------------------------------"
-            echo " 其他设备连接指南 (请确保设备在同一WIFI或热点下):"
+            echo " V2ray/局域网设备 连接指南:"
             echo -e " - 目标 IP : \033[33m$DISPLAY_IP\033[0m"
             echo " - Socks5  : ${PORT_SOCKS}"
             echo " - Http    : ${PORT_HTTP}"
@@ -205,7 +206,7 @@ show_menu(){
             4) [ -f "$LOG_FILE" ] && tail -f "$LOG_FILE" || echo "暂无日志！"; sleep 2 ;;
             0) 
                 echo -e "\n已退出。"
-                echo -e "💡 \033[32m提示：全局快捷指令已注入！你现在可以直接输入 \033[33mgv\033[32m 并回车来唤出此面板。\033[0m\n"
+                echo -e "💡 \033[32m提示：全局快捷指令已生效！请直接输入 \033[33mgv\033[32m 并回车即可再次进入此面板。\033[0m\n"
                 exit 0 
                 ;;
             *) echo "无效输入，请重新选择"; sleep 1 ;;
