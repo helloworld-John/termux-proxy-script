@@ -60,7 +60,7 @@ install_gost() {
     return 0
 }
 
-# 动态生成 YAML 配置文件 (核心修复点：强制绑定 IP 与独立 DNS)
+# 动态生成 YAML 配置文件
 generate_yaml() {
     get_local_ip
     cat > "$CONF_FILE" <<EOF
