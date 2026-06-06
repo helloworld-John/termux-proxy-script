@@ -1,343 +1,344 @@
 #!/usr/bin/env bash
 # =========================================================
-#  Production-grade LAN Proxy Panel (Powered by gost)
-#  Author: Gemini (Expert Bash Scripter)
+# Termux 局域网共享代理管理面板 (基于 gost)
 # =========================================================
 
-# --- 1. 全局配置与环境自适应 ---
-# 终端颜色定义
+# ---------------------------------------------------------
+# 1. 基础配置与全局变量
+# ---------------------------------------------------------
+# ANSI 终端颜色
 readonly RED='\033[1;31m'
 readonly GREEN='\033[1;32m'
 readonly YELLOW='\033[1;33m'
 readonly BLUE='\033[1;34m'
-readonly CYAN='\033[1;36m'
 readonly DIM='\033[2m'
-readonly RESET='\033[0m'
-readonly BOLD='\033[1m'
+readonly NC='\033[0m' # No Color
 
-# 文件路径定义（统一定位到家目录）
+# 文件路径预设
 readonly CONFIG_FILE="$HOME/.start_config"
 readonly PID_FILE="$HOME/.start_proxy.pid"
 readonly LOG_FILE="$HOME/.start_proxy.log"
 
-# 环境适配：兼容 Android Termux 与 标准 Linux
-if [ -n "$PREFIX" ]; then
-    readonly BIN_DIR="$PREFIX/bin"
-else
-    # 优先尝试使用 /usr/local/bin，无权限则使用 $HOME/.local/bin
-    if [ -w "/usr/local/bin" ]; then
-        readonly BIN_DIR="/usr/local/bin"
-    else
-        readonly BIN_DIR="$HOME/.local/bin"
-        mkdir -p "$BIN_DIR" 2>/dev/null
-    fi
-fi
+# Termux 前缀环境变量适配
+export PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 
-# --- 2. 自固化与全局入口设计 ---
-auto_cure_and_inject() {
-    local current_script target_script
-    # 智能获取当前脚本的绝对路径
-    current_script=$(readlink -f "$0" 2>/dev/null || echo "${BASH_SOURCE[0]}")
-    target_script="$HOME/start.sh"
+# ---------------------------------------------------------
+# 2. 环境自固化与快捷全局入口
+# ---------------------------------------------------------
+auto_install_env() {
+    local current_script
+    # 智能获取当前绝对路径
+    current_script=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "$PWD/$0")
+    local target_script="$HOME/start.sh"
 
-    # 1. 脚本自我迁移
-    if [ "$current_script" != "$target_script" ]; then
+    # 如果当前脚本不在目标位置，自动复制自身
+    if [[ "$current_script" != "$target_script" ]]; then
         cp -f "$current_script" "$target_script" 2>/dev/null
         chmod +x "$target_script" 2>/dev/null
-        # 转移后以新路径启动自身并退出旧进程
-        exec bash "$target_script" "$@"
     fi
 
-    # 2. 全局入口注入 (快捷命令 start)
-    # 尝试写入 bin 目录
-    if [ -w "$BIN_DIR" ] && [ ! -f "$BIN_DIR/start" ]; then
-        echo -e "#!/usr/bin/env bash\nbash $target_script \"\$@\"" > "$BIN_DIR/start" 2>/dev/null
-        chmod +x "$BIN_DIR/start" 2>/dev/null
+    # 注入全局快捷命令 start
+    local bin_start="$PREFIX/bin/start"
+    if [[ ! -f "$bin_start" ]]; then
+        mkdir -p "$PREFIX/bin" 2>/dev/null
+        echo -e "#!/usr/bin/env bash\nbash $target_script" > "$bin_start"
+        chmod +x "$bin_start" 2>/dev/null
     fi
 
-    # 尝试写入 shell alias
-    for shell_rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
-        if [ -f "$shell_rc" ] && ! grep -q "alias start=" "$shell_rc" 2>/dev/null; then
-            echo "alias start='bash ~/start.sh'" >> "$shell_rc" 2>/dev/null
+    # 注入 ~/.bashrc 和 ~/.zshrc 别名
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        if [[ -f "$rc" ]] && ! grep -q "alias start=" "$rc" 2>/dev/null; then
+            echo "alias start='bash $target_script'" >> "$rc"
         fi
     done
 }
 
-# --- 3. 智能依赖注入 (自动安装 gost) ---
-install_gost() {
-    if command -v gost >/dev/null 2>&1; then
+# ---------------------------------------------------------
+# 3. 智能依赖注入 (gost 安装)
+# ---------------------------------------------------------
+check_and_install_gost() {
+    if command -v gost &>/dev/null; then
         return 0
     fi
 
-    echo -e "${YELLOW}检测到缺少核心组件 'gost'，正在触发自动化安装链...${RESET}"
+    echo -e "${YELLOW}[!] 检测到未安装 gost，正在启动自动安装链...${NC}"
     
     # 尝试包管理器静默安装
-    if command -v pkg >/dev/null 2>&1; then
-        pkg install -y gost >/dev/null 2>&1 && return 0
-    elif command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update >/dev/null 2>&1
-        sudo apt-get install -y gost >/dev/null 2>&1 && return 0
+    if pkg install gost -y >/dev/null 2>&1; then
+        echo -e "${GREEN}[✔] 通过 Termux 包管理器安装 gost 成功！${NC}"
+        return 0
     fi
 
-    # 包管理器无源，通过官方 GitHub Release 编译部署
-    echo -e "${CYAN}包管理器无可用版本，尝试跨平台官方拉取 (v2.11.5)...${RESET}"
-    local gost_version="2.11.5"
-    local arch sys_os gost_arch url tmp_dir
-    
+    # 包管理器失败则启用动态硬件架构识别与源码部署
+    echo -e "${DIM}[*] 包管理器安装失败，尝试从 GitHub 官方 Release 部署...${NC}"
+    local arch
+    local gost_arch
     arch=$(uname -m)
+    
     case "$arch" in
-        x86_64)          gost_arch="amd64" ;;
-        aarch64|arm64)   gost_arch="armv8" ;;
-        armv7l|armv7)    gost_arch="armv7" ;;
-        i386|i686)       gost_arch="386" ;;
-        *)               echo -e "${RED}致命错误: 不支持的硬件架构 $arch${RESET}"; exit 1 ;;
+        aarch64) gost_arch="armv8" ;;
+        armv7*|armv8l|aarch32) gost_arch="armv7" ;;
+        x86_64) gost_arch="amd64" ;;
+        i*86) gost_arch="386" ;;
+        *) gost_arch="armv8" ;;
     esac
 
-    sys_os="linux"
-    [[ "$OSTYPE" == "darwin"* ]] && sys_os="darwin"
+    local version="2.11.5"
+    local url="https://github.com/ginuerzh/gost/releases/download/v${version}/gost-linux-${gost_arch}-${version}.gz"
+    local tmp_gz="$HOME/gost.tmp.gz"
 
-    url="https://github.com/ginuerzh/gost/releases/download/v${gost_version}/gost-${sys_os}-${gost_arch}-${gost_version}.gz"
-    tmp_dir=$(mktemp -d)
+    # 确保有 curl 和 gzip
+    command -v curl >/dev/null || pkg install curl -y >/dev/null 2>&1
+    command -v gzip >/dev/null || pkg install gzip -y >/dev/null 2>&1
 
-    echo -e "${DIM}下载链路: $url${RESET}"
-    if curl -L --fail --progress-bar -o "$tmp_dir/gost.gz" "$url"; then
-        gzip -d "$tmp_dir/gost.gz" 2>/dev/null
-        chmod +x "$tmp_dir/gost" 2>/dev/null
-        
-        # 尝试提权移动到标准目录
-        if [ -w "$BIN_DIR" ]; then
-            mv -f "$tmp_dir/gost" "$BIN_DIR/" 2>/dev/null
-        else
-            sudo mv -f "$tmp_dir/gost" "$BIN_DIR/" 2>/dev/null
-        fi
-        rm -rf "$tmp_dir"
-        echo -e "${GREEN}组件依赖 'gost' 极速安装完毕！${RESET}"
-        sleep 1
+    echo -e "${DIM}[*] 正在下载 gost (架构: ${gost_arch})...${NC}"
+    if curl -sL "$url" -o "$tmp_gz"; then
+        gzip -d "$tmp_gz" 2>/dev/null
+        mv -f "$HOME/gost.tmp" "$PREFIX/bin/gost" 2>/dev/null
+        chmod +x "$PREFIX/bin/gost" 2>/dev/null
+        echo -e "${GREEN}[✔] 二进制编译版 gost 部署成功！${NC}"
     else
-        echo -e "${RED}安装失败，请检查网络连接或手动安装 gost。${RESET}"
-        rm -rf "$tmp_dir"
-        exit 1
+        echo -e "${RED}[✘] 严重错误：gost 安装失败，请检查网络环境（可能需要挂载临时前置代理）。${NC}"
+        read -n 1 -r -p "按任意键返回..."
+        return 1
     fi
 }
 
-# --- 4. 网络与端口碰撞检测 ---
-get_lan_ips() {
+# ---------------------------------------------------------
+# 4. 核心网络逻辑：有效内网 IP 提取与端口检测
+# ---------------------------------------------------------
+get_lan_ip() {
+    # 依赖 ifconfig, awk 提取 inet 后面的 IP。
+    # 严格排除 127 开头的回环，严格排除以 .255 结尾的广播
     local ips
-    # 通过标准 ip 或 ifconfig 命令提取，并用 grep 排除广播和回环地址
-    if command -v ip >/dev/null 2>&1; then
-        ips=$(ip -4 addr show scope global 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '\.255$')
+    ips=$(ifconfig 2>/dev/null | grep 'inet ' | awk '{print $2}' | sed 's/addr://g' | grep -v '^127\.' | grep -v '\.255$')
+    
+    if [[ -z "$ips" ]]; then
+        echo "未检测到有效局域网IP"
     else
-        ips=$(ifconfig 2>/dev/null | grep -w inet | awk '{print $2}' | sed 's/addr://' | grep -v '127.0.0.1' | grep -v '\.255$')
+        # 考虑到可能有多网卡（如蜂窝+Wi-Fi或VPN虚拟网卡），横向排版输出
+        echo "$ips" | tr '\n' ' ' | sed 's/ $//'
     fi
-    # 格式化输出为逗号分隔
-    echo "$ips" | tr '\n' ' ' | sed 's/ $//' | sed 's/ /, /g'
 }
 
-check_port() {
+is_port_in_use() {
     local port=$1
-    if command -v ss >/dev/null 2>&1; then
-        ss -tuln 2>/dev/null | grep -q ":$port "
-    elif command -v netstat >/dev/null 2>&1; then
-        netstat -tuln 2>/dev/null | grep -q ":$port "
-    else
-        # 兜底检测方案
-        (lsof -i ":$port" >/dev/null 2>&1)
+    # 兼容 netstat 和 ss 检查
+    if command -v ss >/dev/null; then
+        ss -tlun 2>/dev/null | grep -q ":$port " && return 0
+    elif command -v netstat >/dev/null; then
+        netstat -tlun 2>/dev/null | grep -q ":$port " && return 0
     fi
+    return 1 # 未被占用
 }
 
-get_random_port() {
+generate_random_port() {
     local port
     while true; do
-        port=$(shuf -i 10000-60000 -n 1)
-        if ! check_port "$port"; then
+        # 生成 10000 - 60000 范围端口
+        port=$((10000 + RANDOM % 50001))
+        if ! is_port_in_use "$port"; then
             echo "$port"
             return
         fi
     done
 }
 
-# --- 5. 进程守护与日志管理 ---
-get_pid() {
-    if [ -f "$PID_FILE" ]; then
-        cat "$PID_FILE" 2>/dev/null
-    fi
-}
-
-is_running() {
-    local pid
-    pid=$(get_pid)
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-stop_proxy() {
-    if is_running; then
+# ---------------------------------------------------------
+# 5. 进程守护与代理控制
+# ---------------------------------------------------------
+get_proxy_status() {
+    if [[ -f "$PID_FILE" ]]; then
         local pid
-        pid=$(get_pid)
-        kill "$pid" 2>/dev/null
-        sleep 0.5
-        kill -9 "$pid" 2>/dev/null # 补刀
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        # 精确探活：仅 PID 文件存在不够，必须向该 PID 发送探针信号 0
+        if kill -0 "$pid" 2>/dev/null; then
+            echo -e "${GREEN}运行中 (PID: $pid)${NC}"
+            return 0
+        fi
     fi
-    rm -f "$PID_FILE" 2>/dev/null
+    echo -e "${DIM}已停止${NC}"
+    return 1
 }
 
 start_proxy() {
-    install_gost
-
-    # 读取配置
-    local socks_p http_p
-    if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE"
-    fi
-    socks_p=${SOCKS_PORT:-}
-    http_p=${HTTP_PORT:-}
-
-    # 初次启动要求配置端口
-    if [ -z "$socks_p" ] || [ -z "$http_p" ]; then
-        echo -e "${CYAN}首次启动配置 (直接回车将自动分配 10000-60000 安全端口)${RESET}"
-        
-        # Socks5
-        read -r -p "设置 SOCKS5 代理端口: " input_socks
-        if [ -z "$input_socks" ]; then
-            socks_p=$(get_random_port)
-            echo -e "${DIM}└─ 分配随机端口: $socks_p${RESET}"
-        else
-            while check_port "$input_socks"; do
-                echo -e "${RED}端口 $input_socks 被占用，请重新输入!${RESET}"
-                read -r -p "设置 SOCKS5 代理端口: " input_socks
-            done
-            socks_p=$input_socks
-        fi
-
-        # HTTP
-        read -r -p "设置 HTTP 代理端口: " input_http
-        if [ -z "$input_http" ]; then
-            http_p=$(get_random_port)
-            echo -e "${DIM}└─ 分配随机端口: $http_p${RESET}"
-        else
-            while check_port "$input_http" || [ "$input_http" == "$socks_p" ]; do
-                echo -e "${RED}端口冲突或被占用，请重新输入!${RESET}"
-                read -r -p "设置 HTTP 代理端口: " input_http
-            done
-            http_p=$input_http
-        fi
-
-        # 写入配置
-        echo "SOCKS_PORT=$socks_p" > "$CONFIG_FILE"
-        echo "HTTP_PORT=$http_p" >> "$CONFIG_FILE"
-    fi
-
-    stop_proxy # 确保旧进程已停
+    check_and_install_gost || return
     
-    # 核心推入后台并静默挂载
-    nohup gost -L="socks5://:$socks_p" -L="http://:$http_p" > "$LOG_FILE" 2>&1 &
+    if get_proxy_status >/dev/null; then
+        echo -e "${YELLOW}[!] 代理已在运行中。请先停止后再启动。${NC}"
+        read -n 1 -r -p "按任意键继续..."
+        return
+    fi
+
+    local port=""
+    if [[ -f "$CONFIG_FILE" ]]; then
+        port=$(cat "$CONFIG_FILE" 2>/dev/null)
+    fi
+
+    if [[ -z "$port" ]]; then
+        echo -ne "请输入要开放的代理端口号 (按 ${GREEN}[回车]${NC} 自动生成随机端口): "
+        read -r user_port
+        if [[ -z "$user_port" ]]; then
+            port=$(generate_random_port)
+            echo -e "${DIM}[*] 已自动分配空闲端口: $port${NC}"
+        else
+            port=$user_port
+        fi
+        
+        # 端口占用死循环检测
+        while is_port_in_use "$port"; do
+            echo -e "${RED}[!] 端口 $port 已被其他程序占用！${NC}"
+            echo -ne "请重新输入端口号 (按 ${GREEN}[回车]${NC} 自动生成): "
+            read -r user_port
+            if [[ -z "$user_port" ]]; then
+                port=$(generate_random_port)
+                echo -e "${DIM}[*] 已自动分配空闲端口: $port${NC}"
+            else
+                port=$user_port
+            fi
+        done
+        
+        echo "$port" > "$CONFIG_FILE"
+    fi
+
+    # 清理旧日志并推入后台执行 (Gost 默认缺省协议为 HTTP & SOCKS5 并存)
+    > "$LOG_FILE"
+    nohup gost -L=:$port > "$LOG_FILE" 2>&1 &
     local new_pid=$!
     echo "$new_pid" > "$PID_FILE"
-
-    sleep 1 # 等待进程稳定
-    if is_running; then
-        echo -e "${GREEN}代理已成功启动! PID: $new_pid${RESET}"
-        sleep 1
+    
+    sleep 1 # 等待 gost 申请端口与初始化
+    if kill -0 "$new_pid" 2>/dev/null; then
+        echo -e "${GREEN}[✔] 代理启动成功！生效端口: $port${NC}"
     else
-        echo -e "${RED}代理启动失败，请查看日志分析原因。${RESET}"
-        sleep 2
+        echo -e "${RED}[✘] 代理启动失败，请检查日志。${NC}"
     fi
+    read -n 1 -r -p "按任意键继续..."
 }
 
-# --- 6. ASCII UI 面板与交互循环 ---
-show_ui() {
+stop_proxy() {
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null
+            echo -e "${GREEN}[✔] 代理进程 (PID: $pid) 已安全终止。${NC}"
+        else
+            echo -e "${DIM}[*] 未发现存活的代理进程，已清理冗余文件。${NC}"
+        fi
+    else
+        echo -e "${DIM}[*] 代理原本就没有运行。${NC}"
+    fi
+    
+    # 彻底抹除配置与运行痕迹
+    rm -f "$PID_FILE" "$CONFIG_FILE" "$LOG_FILE" 2>/dev/null
+    read -n 1 -r -p "按任意键继续..."
+}
+
+modify_port() {
+    if get_proxy_status >/dev/null; then
+        echo -e "${YELLOW}[!] 检测到代理正在运行中，修改端口前需先停止。${NC}"
+        stop_proxy
+    fi
+    # 删除旧配置后直接调用 start 引导交互
+    rm -f "$CONFIG_FILE" 2>/dev/null
+    start_proxy
+}
+
+view_logs() {
+    if [[ ! -f "$LOG_FILE" ]]; then
+        echo -e "${YELLOW}[!] 日志文件不存在或代理尚未运行过。${NC}"
+        read -n 1 -r -p "按任意键继续..."
+        return
+    fi
     clear
-    local status_text pid_text socks_text http_text lan_ips
-    lan_ips=$(get_lan_ips)
-    [ -z "$lan_ips" ] && lan_ips="未检测到有效内网IP"
-
-    if is_running; then
-        status_text="${GREEN}运行中${RESET}"
-        pid_text="${DIM}$(get_pid)${RESET}"
-        source "$CONFIG_FILE" 2>/dev/null
-        socks_text="${BLUE}${SOCKS_PORT}${RESET}"
-        http_text="${BLUE}${HTTP_PORT}${RESET}"
-    else
-        status_text="${RED}已停止${RESET}"
-        pid_text="${DIM}N/A${RESET}"
-        socks_text="${DIM}N/A${RESET}"
-        http_text="${DIM}N/A${RESET}"
-    fi
-
-    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${RESET}"
-    echo -e "${CYAN}║${RESET} ${BOLD}               局域网代理控制面板 (Powered by gost)         ${RESET}${CYAN}║${RESET}"
-    echo -e "${CYAN}╠══════════════════════════════════════════════════════════════╣${RESET}"
-    printf "${CYAN}║${RESET} 状态: [%b] | PID: %-37b ${CYAN}║${RESET}\n" "$status_text" "$pid_text"
-    printf "${CYAN}║${RESET} SOCKS5 端口: %-46b ${CYAN}║${RESET}\n" "$socks_text"
-    printf "${CYAN}║${RESET} HTTP 端口:   %-46b ${CYAN}║${RESET}\n" "$http_text"
-    printf "${CYAN}║${RESET} 可用内网 IP: %-46b ${CYAN}║${RESET}\n" "${YELLOW}${lan_ips}${RESET}"
-    echo -e "${CYAN}╠══════════════════════════════════════════════════════════════╣${RESET}"
-    echo -e "${CYAN}║${RESET} [1] 启动 / 重启代理                                          ${CYAN}║${RESET}"
-    echo -e "${CYAN}║${RESET} [2] 停止并卸载代理                                           ${CYAN}║${RESET}"
-    echo -e "${CYAN}║${RESET} [3] 查看当前配置明细                                         ${CYAN}║${RESET}"
-    echo -e "${CYAN}║${RESET} [4] 实时查看日志 (Ctrl+C 退出查看)                           ${CYAN}║${RESET}"
-    echo -e "${CYAN}║${RESET} [5] 重新设置端口                                             ${CYAN}║${RESET}"
-    echo -e "${CYAN}║${RESET} [0] 退出面板                                                 ${CYAN}║${RESET}"
-    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${RESET}"
+    echo -e "==========================================="
+    echo -e " ${GREEN}实时日志查看 (按 Ctrl+C 退出查看)${NC}"
+    echo -e "==========================================="
+    # 使用 trap 防止 Ctrl+C 把整个面板脚本杀掉
+    trap 'break' INT
+    tail -f "$LOG_FILE"
+    trap - INT
 }
 
-interactive_loop() {
+# ---------------------------------------------------------
+# 6. ASCII UI 与交互主循环
+# ---------------------------------------------------------
+draw_menu() {
+    clear
+    local current_status
+    local current_ip
+    local current_port="未设置"
+
+    current_status=$(get_proxy_status)
+    current_ip=$(get_lan_ip)
+    if [[ -f "$CONFIG_FILE" ]]; then
+        current_port=$(cat "$CONFIG_FILE" 2>/dev/null)
+    fi
+
+    echo -e "${BLUE}╔═════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║${NC}          ${GREEN}局域网共享代理管理面板${NC} (gost版)        ${BLUE}║${NC}"
+    echo -e "${BLUE}╠═════════════════════════════════════════════════╣${NC}"
+    echo -e "${BLUE}║${NC} 当前状态 : $current_status"
+    echo -e "${BLUE}║${NC} 本机内网 : ${YELLOW}$current_ip${NC}"
+    echo -e "${BLUE}║${NC} 代理端口 : ${YELLOW}$current_port${NC}"
+    echo -e "${BLUE}╠═════════════════════════════════════════════════╣${NC}"
+    echo -e "${BLUE}║${NC}  ${YELLOW}1.${NC} 启动 / 重启代理 (首次启动引导设置)           ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${YELLOW}2.${NC} 卸载代理 (停止进程并清理所有痕迹)            ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${YELLOW}3.${NC} 查看当前配置详情                             ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${YELLOW}4.${NC} 实时查看底层日志 (排错专用)                  ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${YELLOW}5.${NC} 修改端口号                                   ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${RED}0.${NC} 退出面板 (代理后台常驻，敲 ${GREEN}start${NC} 随时唤出)   ${BLUE}║${NC}"
+    echo -e "${BLUE}╚═════════════════════════════════════════════════╝${NC}"
+    echo -ne " ${DIM}请选择操作选项 [0-5]:${NC} "
+}
+
+main_loop() {
+    # 执行环境自检与固化
+    auto_install_env
+    
     while true; do
-        show_ui
-        read -r -p "请选择操作 [0-5]: " choice
+        draw_menu
+        read -r choice
         case "$choice" in
             1)
                 start_proxy
                 ;;
             2)
                 stop_proxy
-                rm -f "$CONFIG_FILE" "$LOG_FILE" 2>/dev/null
-                echo -e "${GREEN}代理已停止，配置及日志已清除。${RESET}"
-                sleep 1.5
                 ;;
             3)
-                if [ -f "$CONFIG_FILE" ]; then
-                    echo -e "\n${BOLD}当前配置详情：${RESET}"
-                    cat "$CONFIG_FILE"
+                echo -e "\n${BLUE}========== 当前配置参数 ==========${NC}"
+                if [[ -f "$CONFIG_FILE" ]]; then
+                    echo -e "连接协议 : HTTP / SOCKS5 双栈自适应"
+                    echo -e "连接地址 : $(get_lan_ip)"
+                    echo -e "端口号码 : $(cat "$CONFIG_FILE")"
+                    echo -e "底层日志 : $LOG_FILE"
                 else
-                    echo -e "\n${YELLOW}未发现有效配置。${RESET}"
+                    echo -e "${DIM}尚未生成配置文件，请先启动代理。${NC}"
                 fi
-                read -r -n 1 -s -p "$(echo -e ${DIM}按任意键返回...${RESET})"
+                echo -e "${BLUE}==================================${NC}"
+                read -n 1 -r -p "按任意键继续..."
                 ;;
             4)
-                if [ -f "$LOG_FILE" ]; then
-                    echo -e "\n${YELLOW}正在进入实时日志查看 (按 Ctrl+C 返回菜单)...${RESET}\n"
-                    # 使用 trap 捕获此处的 Ctrl+C 以防止整个脚本退出
-                    trap 'trap - INT; return 2>/dev/null || true' INT
-                    tail -f "$LOG_FILE"
-                    trap - INT
-                else
-                    echo -e "\n${YELLOW}当前无日志文件。${RESET}"
-                    read -r -n 1 -s -p "$(echo -e ${DIM}按任意键返回...${RESET})"
-                fi
+                view_logs
                 ;;
             5)
-                rm -f "$CONFIG_FILE" 2>/dev/null
-                echo -e "\n${GREEN}已重置配置，稍后重启将引导重新生成端口。${RESET}"
-                sleep 1.5
-                start_proxy
+                modify_port
                 ;;
             0)
-                echo -e "\n${GREEN}面板已退出。${RESET}"
-                if is_running; then
-                    echo -e "${DIM}提示: 代理在后台静默运行中。在任何目录下输入 ${BOLD}'start'${RESET}${DIM} 即可随时唤出面板。${RESET}\n"
-                fi
+                echo -e "\n${GREEN}[✔] 已退出面板！${NC}"
+                echo -e "${DIM}提示：哪怕完全关闭 Termux 会话，只要安卓未杀后台，代理将持续有效。${NC}"
+                echo -e "${DIM}若要再次呼出面板，随时随地输入命令: ${GREEN}start${NC}\n"
                 exit 0
                 ;;
             *)
+                echo -e "${RED}[!] 无效的输入，请重新选择。${NC}"
+                sleep 1
                 ;;
         esac
     done
 }
 
-# --- 7. 主程序入口 ---
-auto_cure_and_inject
-interactive_loop
+# 启动入口
+main_loop
