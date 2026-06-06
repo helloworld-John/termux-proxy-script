@@ -1,344 +1,464 @@
-#!/usr/bin/env bash
-# =========================================================
-# Termux 局域网共享代理管理面板 (基于 gost)
-# =========================================================
+#!/data/data/com.termux/files/usr/bin/bash
+# ================================================================
+#  start.sh — LAN Proxy Management Panel (gost-powered)
+#  Designed for Android Termux | Production-Grade | Self-Healing
+# ================================================================
 
-# ---------------------------------------------------------
-# 1. 基础配置与全局变量
-# ---------------------------------------------------------
-# ANSI 终端颜色
-readonly RED='\033[1;31m'
-readonly GREEN='\033[1;32m'
-readonly YELLOW='\033[1;33m'
-readonly BLUE='\033[1;34m'
-readonly DIM='\033[2m'
-readonly NC='\033[0m' # No Color
+# ── ANSI 颜色变量 ────────────────────────────────────────────────
+R='\033[0;31m'   # Red
+G='\033[0;32m'   # Green
+Y='\033[0;33m'   # Yellow
+B='\033[0;34m'   # Blue
+C='\033[0;36m'   # Cyan
+W='\033[1;37m'   # White Bold
+M='\033[0;35m'   # Magenta
+DIM='\033[2m'    # Dim
+NC='\033[0m'     # No Color / Reset
 
-# 文件路径预设
-readonly CONFIG_FILE="$HOME/.start_config"
-readonly PID_FILE="$HOME/.start_proxy.pid"
-readonly LOG_FILE="$HOME/.start_proxy.log"
+# ── 全局文件路径 ─────────────────────────────────────────────────
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+CONFIG_FILE="$HOME/.start_config"
+PID_FILE="$HOME/.start_proxy.pid"
+LOG_FILE="$HOME/.start_proxy.log"
+SELF_PATH="$HOME/start.sh"
+LAUNCHER="$PREFIX/bin/start"
+GOST_BIN="$PREFIX/bin/gost"
+GOST_VER="2.11.5"
 
-# Termux 前缀环境变量适配
-export PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+# ================================================================
+#  § 1  自固化与全局入口注入
+# ================================================================
 
-# ---------------------------------------------------------
-# 2. 环境自固化与快捷全局入口
-# ---------------------------------------------------------
-auto_install_env() {
-    local current_script
-    # 智能获取当前绝对路径
-    current_script=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "$PWD/$0")
-    local target_script="$HOME/start.sh"
+get_real_path() {
+    local src="${BASH_SOURCE[0]:-$0}"
+    local real
+    real="$(readlink -f "$src" 2>/dev/null || realpath "$src" 2>/dev/null || echo "$src")"
+    echo "$real"
+}
 
-    # 如果当前脚本不在目标位置，自动复制自身
-    if [[ "$current_script" != "$target_script" ]]; then
-        cp -f "$current_script" "$target_script" 2>/dev/null
-        chmod +x "$target_script" 2>/dev/null
+self_solidify() {
+    local real_path
+    real_path="$(get_real_path)"
+
+    # 若当前位置不是 ~/start.sh，则复制自身
+    if [[ "$real_path" != "$SELF_PATH" ]]; then
+        cp "$real_path" "$SELF_PATH" 2>/dev/null
+        chmod +x "$SELF_PATH" 2>/dev/null
     fi
 
-    # 注入全局快捷命令 start
-    local bin_start="$PREFIX/bin/start"
-    if [[ ! -f "$bin_start" ]]; then
-        mkdir -p "$PREFIX/bin" 2>/dev/null
-        echo -e "#!/usr/bin/env bash\nbash $target_script" > "$bin_start"
-        chmod +x "$bin_start" 2>/dev/null
+    # 写入 $PREFIX/bin/start 全局启动器
+    if [[ ! -f "$LAUNCHER" ]] || ! grep -q "start.sh" "$LAUNCHER" 2>/dev/null; then
+        cat > "$LAUNCHER" <<'EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+exec bash "$HOME/start.sh" "$@"
+EOF
+        chmod +x "$LAUNCHER" 2>/dev/null
     fi
 
-    # 注入 ~/.bashrc 和 ~/.zshrc 别名
+    # 向 .bashrc 注入别名
+    local alias_line="alias start='bash ~/start.sh'"
     for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
-        if [[ -f "$rc" ]] && ! grep -q "alias start=" "$rc" 2>/dev/null; then
-            echo "alias start='bash $target_script'" >> "$rc"
+        if [[ -f "$rc" ]] && ! grep -qF "$alias_line" "$rc" 2>/dev/null; then
+            echo "$alias_line" >> "$rc"
         fi
     done
 }
 
-# ---------------------------------------------------------
-# 3. 智能依赖注入 (gost 安装)
-# ---------------------------------------------------------
-check_and_install_gost() {
-    if command -v gost &>/dev/null; then
-        return 0
-    fi
+# ================================================================
+#  § 2  gost 智能依赖安装
+# ================================================================
 
-    echo -e "${YELLOW}[!] 检测到未安装 gost，正在启动自动安装链...${NC}"
-    
-    # 尝试包管理器静默安装
-    if pkg install gost -y >/dev/null 2>&1; then
-        echo -e "${GREEN}[✔] 通过 Termux 包管理器安装 gost 成功！${NC}"
-        return 0
-    fi
-
-    # 包管理器失败则启用动态硬件架构识别与源码部署
-    echo -e "${DIM}[*] 包管理器安装失败，尝试从 GitHub 官方 Release 部署...${NC}"
-    local arch
-    local gost_arch
-    arch=$(uname -m)
-    
-    case "$arch" in
-        aarch64) gost_arch="armv8" ;;
-        armv7*|armv8l|aarch32) gost_arch="armv7" ;;
-        x86_64) gost_arch="amd64" ;;
-        i*86) gost_arch="386" ;;
-        *) gost_arch="armv8" ;;
+get_arch() {
+    local machine
+    machine="$(uname -m)"
+    case "$machine" in
+        aarch64|arm64) echo "armv8" ;;
+        armv7*|armv7)  echo "armv7" ;;
+        x86_64)        echo "amd64" ;;
+        i686|i386)     echo "386"   ;;
+        *)             echo "armv8" ;;  # 默认 fallback
     esac
+}
 
-    local version="2.11.5"
-    local url="https://github.com/ginuerzh/gost/releases/download/v${version}/gost-linux-${gost_arch}-${version}.gz"
-    local tmp_gz="$HOME/gost.tmp.gz"
+install_gost() {
+    echo -e "${Y}[*] gost 未找到，正在尝试自动安装...${NC}"
+    sleep 1
 
-    # 确保有 curl 和 gzip
-    command -v curl >/dev/null || pkg install curl -y >/dev/null 2>&1
-    command -v gzip >/dev/null || pkg install gzip -y >/dev/null 2>&1
+    # 方式一：pkg 包管理器
+    echo -e "${DIM}    尝试 pkg install gost ...${NC}"
+    if pkg install gost -y 2>/dev/null; then
+        if command -v gost &>/dev/null || [[ -x "$GOST_BIN" ]]; then
+            echo -e "${G}[✓] pkg 安装 gost 成功${NC}"
+            return 0
+        fi
+    fi
 
-    echo -e "${DIM}[*] 正在下载 gost (架构: ${gost_arch})...${NC}"
-    if curl -sL "$url" -o "$tmp_gz"; then
-        gzip -d "$tmp_gz" 2>/dev/null
-        mv -f "$HOME/gost.tmp" "$PREFIX/bin/gost" 2>/dev/null
-        chmod +x "$PREFIX/bin/gost" 2>/dev/null
-        echo -e "${GREEN}[✔] 二进制编译版 gost 部署成功！${NC}"
+    # 方式二：GitHub Release 手动下载
+    local arch
+    arch="$(get_arch)"
+    local fname="gost_${GOST_VER}_linux_${arch}.tar.gz"
+    local url="https://github.com/ginuerzh/gost/releases/download/v${GOST_VER}/${fname}"
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+
+    echo -e "${DIM}    架构识别: ${arch}${NC}"
+    echo -e "${DIM}    下载: ${url}${NC}"
+
+    if curl -fsSL --connect-timeout 20 --retry 3 -o "${tmp_dir}/${fname}" "$url" 2>/dev/null; then
+        tar -xzf "${tmp_dir}/${fname}" -C "$tmp_dir" 2>/dev/null
+        local gost_exe
+        gost_exe="$(find "$tmp_dir" -name "gost" -type f 2>/dev/null | head -1)"
+        if [[ -n "$gost_exe" ]]; then
+            cp "$gost_exe" "$GOST_BIN" && chmod +x "$GOST_BIN"
+            rm -rf "$tmp_dir" 2>/dev/null
+            echo -e "${G}[✓] GitHub 手动安装 gost 成功${NC}"
+            return 0
+        fi
+    fi
+
+    rm -rf "$tmp_dir" 2>/dev/null
+    echo -e "${R}[✗] gost 安装失败，请检查网络连接后重试${NC}"
+    return 1
+}
+
+check_gost() {
+    command -v gost &>/dev/null || [[ -x "$GOST_BIN" ]]
+}
+
+# ================================================================
+#  § 3  网络工具函数
+# ================================================================
+
+get_lan_ips() {
+    ifconfig 2>/dev/null \
+        | grep -oP 'inet \K[\d.]+' \
+        | grep -v '^127\.' \
+        | grep -v '^100\.' \
+        | grep -v '\.255$' \
+        | grep -E '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)' \
+        | sort -u
+}
+
+is_port_in_use() {
+    local port="$1"
+    ss -lntu 2>/dev/null | grep -qP "[:.]${port}\b" \
+        || netstat -lntu 2>/dev/null | grep -qP "[:.]${port}\b"
+}
+
+random_free_port() {
+    local port
+    while true; do
+        port=$(( RANDOM % 50001 + 10000 ))
+        if ! is_port_in_use "$port"; then
+            echo "$port"
+            return 0
+        fi
+    done
+}
+
+prompt_port() {
+    local label="$1"
+    local port_var="$2"
+    local suggested
+    suggested="$(random_free_port)"
+    local input
+
+    while true; do
+        echo -ne "${C}  ${label} [直接回车随机 ${suggested}]: ${NC}"
+        read -r input
+        [[ -z "$input" ]] && input="$suggested"
+
+        # 验证数字范围
+        if ! [[ "$input" =~ ^[0-9]+$ ]] || (( input < 1024 || input > 65535 )); then
+            echo -e "${R}  端口须在 1024-65535 之间${NC}"
+            continue
+        fi
+
+        if is_port_in_use "$input"; then
+            echo -e "${R}  端口 ${input} 已被占用，请换一个${NC}"
+            suggested="$(random_free_port)"
+            continue
+        fi
+
+        eval "$port_var=$input"
+        return 0
+    done
+}
+
+# ================================================================
+#  § 4  配置文件读写
+# ================================================================
+
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE"
+    fi
+}
+
+save_config() {
+    local socks_port="$1"
+    local http_port="$2"
+    cat > "$CONFIG_FILE" <<EOF
+SOCKS_PORT=${socks_port}
+HTTP_PORT=${http_port}
+EOF
+}
+
+# ================================================================
+#  § 5  进程守护：启动 / 停止 / 状态
+# ================================================================
+
+start_proxy() {
+    load_config
+
+    # 若无配置，引导用户设置端口
+    if [[ -z "$SOCKS_PORT" || -z "$HTTP_PORT" ]]; then
+        echo -e "\n${W}  首次启动，请配置监听端口${NC}"
+        prompt_port "SOCKS5 端口" SOCKS_PORT
+        prompt_port "HTTP  端口" HTTP_PORT
+        save_config "$SOCKS_PORT" "$HTTP_PORT"
     else
-        echo -e "${RED}[✘] 严重错误：gost 安装失败，请检查网络环境（可能需要挂载临时前置代理）。${NC}"
-        read -n 1 -r -p "按任意键返回..."
+        # 检查已保存端口是否仍可用（防止重启后端口被占）
+        if is_port_in_use "$SOCKS_PORT"; then
+            echo -e "${Y}  原 SOCKS 端口 ${SOCKS_PORT} 已被占用，重新分配...${NC}"
+            prompt_port "SOCKS5 端口" SOCKS_PORT
+        fi
+        if is_port_in_use "$HTTP_PORT"; then
+            echo -e "${Y}  原 HTTP 端口 ${HTTP_PORT} 已被占用，重新分配...${NC}"
+            prompt_port "HTTP  端口" HTTP_PORT
+        fi
+        save_config "$SOCKS_PORT" "$HTTP_PORT"
+    fi
+
+    # 确保 gost 已安装
+    if ! check_gost; then
+        install_gost || { echo -e "${R}  无法启动：gost 不可用${NC}"; return 1; }
+    fi
+
+    # 停止已有进程
+    stop_proxy_silent
+
+    # 启动 gost（socks5 + http 双协议）
+    local gost_cmd
+    gost_cmd="$(command -v gost 2>/dev/null || echo "$GOST_BIN")"
+
+    nohup "$gost_cmd" \
+        -L "socks5://:${SOCKS_PORT}" \
+        -L "http://:${HTTP_PORT}" \
+        > "$LOG_FILE" 2>&1 &
+
+    local pid=$!
+    echo "$pid" > "$PID_FILE"
+    sleep 1
+
+    if kill -0 "$pid" 2>/dev/null; then
+        echo -e "${G}  [✓] 代理已启动 (PID: ${pid})${NC}"
+        echo -e "${G}  SOCKS5: ${SOCKS_PORT}  |  HTTP: ${HTTP_PORT}${NC}"
+    else
+        echo -e "${R}  [✗] 启动失败，请查看日志${NC}"
+        rm -f "$PID_FILE" 2>/dev/null
         return 1
     fi
 }
 
-# ---------------------------------------------------------
-# 4. 核心网络逻辑：有效内网 IP 提取与端口检测
-# ---------------------------------------------------------
-get_lan_ip() {
-    # 依赖 ifconfig, awk 提取 inet 后面的 IP。
-    # 严格排除 127 开头的回环，严格排除以 .255 结尾的广播
-    local ips
-    ips=$(ifconfig 2>/dev/null | grep 'inet ' | awk '{print $2}' | sed 's/addr://g' | grep -v '^127\.' | grep -v '\.255$')
-    
-    if [[ -z "$ips" ]]; then
-        echo "未检测到有效局域网IP"
-    else
-        # 考虑到可能有多网卡（如蜂窝+Wi-Fi或VPN虚拟网卡），横向排版输出
-        echo "$ips" | tr '\n' ' ' | sed 's/ $//'
-    fi
-}
-
-is_port_in_use() {
-    local port=$1
-    # 兼容 netstat 和 ss 检查
-    if command -v ss >/dev/null; then
-        ss -tlun 2>/dev/null | grep -q ":$port " && return 0
-    elif command -v netstat >/dev/null; then
-        netstat -tlun 2>/dev/null | grep -q ":$port " && return 0
-    fi
-    return 1 # 未被占用
-}
-
-generate_random_port() {
-    local port
-    while true; do
-        # 生成 10000 - 60000 范围端口
-        port=$((10000 + RANDOM % 50001))
-        if ! is_port_in_use "$port"; then
-            echo "$port"
-            return
-        fi
-    done
-}
-
-# ---------------------------------------------------------
-# 5. 进程守护与代理控制
-# ---------------------------------------------------------
-get_proxy_status() {
+stop_proxy_silent() {
     if [[ -f "$PID_FILE" ]]; then
         local pid
-        pid=$(cat "$PID_FILE" 2>/dev/null)
-        # 精确探活：仅 PID 文件存在不够，必须向该 PID 发送探针信号 0
-        if kill -0 "$pid" 2>/dev/null; then
-            echo -e "${GREEN}运行中 (PID: $pid)${NC}"
-            return 0
-        fi
-    fi
-    echo -e "${DIM}已停止${NC}"
-    return 1
-}
-
-start_proxy() {
-    check_and_install_gost || return
-    
-    if get_proxy_status >/dev/null; then
-        echo -e "${YELLOW}[!] 代理已在运行中。请先停止后再启动。${NC}"
-        read -n 1 -r -p "按任意键继续..."
-        return
-    fi
-
-    local port=""
-    if [[ -f "$CONFIG_FILE" ]]; then
-        port=$(cat "$CONFIG_FILE" 2>/dev/null)
-    fi
-
-    if [[ -z "$port" ]]; then
-        echo -ne "请输入要开放的代理端口号 (按 ${GREEN}[回车]${NC} 自动生成随机端口): "
-        read -r user_port
-        if [[ -z "$user_port" ]]; then
-            port=$(generate_random_port)
-            echo -e "${DIM}[*] 已自动分配空闲端口: $port${NC}"
-        else
-            port=$user_port
-        fi
-        
-        # 端口占用死循环检测
-        while is_port_in_use "$port"; do
-            echo -e "${RED}[!] 端口 $port 已被其他程序占用！${NC}"
-            echo -ne "请重新输入端口号 (按 ${GREEN}[回车]${NC} 自动生成): "
-            read -r user_port
-            if [[ -z "$user_port" ]]; then
-                port=$(generate_random_port)
-                echo -e "${DIM}[*] 已自动分配空闲端口: $port${NC}"
-            else
-                port=$user_port
-            fi
-        done
-        
-        echo "$port" > "$CONFIG_FILE"
-    fi
-
-    # 清理旧日志并推入后台执行 (Gost 默认缺省协议为 HTTP & SOCKS5 并存)
-    > "$LOG_FILE"
-    nohup gost -L=:$port > "$LOG_FILE" 2>&1 &
-    local new_pid=$!
-    echo "$new_pid" > "$PID_FILE"
-    
-    sleep 1 # 等待 gost 申请端口与初始化
-    if kill -0 "$new_pid" 2>/dev/null; then
-        echo -e "${GREEN}[✔] 代理启动成功！生效端口: $port${NC}"
-    else
-        echo -e "${RED}[✘] 代理启动失败，请检查日志。${NC}"
-    fi
-    read -n 1 -r -p "按任意键继续..."
-}
-
-stop_proxy() {
-    if [[ -f "$PID_FILE" ]]; then
-        local pid
-        pid=$(cat "$PID_FILE" 2>/dev/null)
-        if kill -0 "$pid" 2>/dev/null; then
+        pid="$(cat "$PID_FILE" 2>/dev/null)"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null
-            echo -e "${GREEN}[✔] 代理进程 (PID: $pid) 已安全终止。${NC}"
-        else
-            echo -e "${DIM}[*] 未发现存活的代理进程，已清理冗余文件。${NC}"
+            sleep 0.5
+            kill -9 "$pid" 2>/dev/null
         fi
+        rm -f "$PID_FILE" 2>/dev/null
+    fi
+    # 兜底：杀掉同名进程
+    pkill -f "gost.*socks5\|gost.*http" 2>/dev/null || true
+}
+
+is_proxy_running() {
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid="$(cat "$PID_FILE" 2>/dev/null)"
+        [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
     else
-        echo -e "${DIM}[*] 代理原本就没有运行。${NC}"
+        return 1
     fi
-    
-    # 彻底抹除配置与运行痕迹
-    rm -f "$PID_FILE" "$CONFIG_FILE" "$LOG_FILE" 2>/dev/null
-    read -n 1 -r -p "按任意键继续..."
 }
 
-modify_port() {
-    if get_proxy_status >/dev/null; then
-        echo -e "${YELLOW}[!] 检测到代理正在运行中，修改端口前需先停止。${NC}"
-        stop_proxy
+get_proxy_pid() {
+    [[ -f "$PID_FILE" ]] && cat "$PID_FILE" 2>/dev/null || echo "-"
+}
+
+# ================================================================
+#  § 6  菜单动作函数
+# ================================================================
+
+action_start_restart() {
+    if is_proxy_running; then
+        echo -e "\n${Y}  检测到代理正在运行，将执行重启...${NC}"
+        stop_proxy_silent
+        sleep 0.5
     fi
-    # 删除旧配置后直接调用 start 引导交互
-    rm -f "$CONFIG_FILE" 2>/dev/null
     start_proxy
+    echo -ne "\n${DIM}  按回车返回菜单...${NC}"; read -r
 }
 
-view_logs() {
+action_uninstall() {
+    echo -ne "\n${R}  确认停止代理并清除所有配置/日志? [y/N]: ${NC}"
+    read -r confirm
+    if [[ "${confirm,,}" == "y" ]]; then
+        stop_proxy_silent
+        rm -f "$CONFIG_FILE" "$LOG_FILE" "$PID_FILE" 2>/dev/null
+        echo -e "${G}  [✓] 已卸载，所有配置和日志已清除${NC}"
+    else
+        echo -e "${DIM}  已取消${NC}"
+    fi
+    echo -ne "\n${DIM}  按回车返回菜单...${NC}"; read -r
+}
+
+action_show_config() {
+    load_config
+    echo -e "\n${W}  ── 当前配置 ────────────────────────────${NC}"
+    echo -e "  配置文件  : ${DIM}${CONFIG_FILE}${NC}"
+    echo -e "  SOCKS5 端口: ${C}${SOCKS_PORT:-未设置}${NC}"
+    echo -e "  HTTP  端口 : ${C}${HTTP_PORT:-未设置}${NC}"
+    echo -e "  PID 文件  : ${DIM}${PID_FILE}${NC}"
+    echo -e "  日志文件  : ${DIM}${LOG_FILE}${NC}"
+    echo -e "  gost 路径  : ${DIM}$(command -v gost 2>/dev/null || echo "$GOST_BIN")${NC}"
+    echo ""
+    echo -e "${W}  ── 可用局域网 IP ────────────────────────${NC}"
+    local ips
+    ips="$(get_lan_ips)"
+    if [[ -z "$ips" ]]; then
+        echo -e "  ${R}暂无可用局域网 IP（请检查网络连接）${NC}"
+    else
+        while IFS= read -r ip; do
+            echo -e "  ${G}●${NC} ${ip}"
+            [[ -n "$SOCKS_PORT" ]] && echo -e "    ${DIM}socks5://${ip}:${SOCKS_PORT}${NC}"
+            [[ -n "$HTTP_PORT"  ]] && echo -e "    ${DIM}http://${ip}:${HTTP_PORT}${NC}"
+        done <<< "$ips"
+    fi
+    echo -ne "\n${DIM}  按回车返回菜单...${NC}"; read -r
+}
+
+action_view_log() {
     if [[ ! -f "$LOG_FILE" ]]; then
-        echo -e "${YELLOW}[!] 日志文件不存在或代理尚未运行过。${NC}"
-        read -n 1 -r -p "按任意键继续..."
+        echo -e "\n${Y}  日志文件不存在（代理尚未运行过）${NC}"
+        echo -ne "\n${DIM}  按回车返回菜单...${NC}"; read -r
         return
     fi
-    clear
-    echo -e "==========================================="
-    echo -e " ${GREEN}实时日志查看 (按 Ctrl+C 退出查看)${NC}"
-    echo -e "==========================================="
-    # 使用 trap 防止 Ctrl+C 把整个面板脚本杀掉
-    trap 'break' INT
+    echo -e "\n${DIM}  实时日志（Ctrl+C 退出查看，不影响代理运行）${NC}\n"
     tail -f "$LOG_FILE"
-    trap - INT
 }
 
-# ---------------------------------------------------------
-# 6. ASCII UI 与交互主循环
-# ---------------------------------------------------------
-draw_menu() {
-    clear
-    local current_status
-    local current_ip
-    local current_port="未设置"
+action_change_port() {
+    load_config
+    echo -e "\n${W}  修改端口配置${NC}"
+    echo -e "  当前 SOCKS5: ${C}${SOCKS_PORT:-未设置}${NC}  HTTP: ${C}${HTTP_PORT:-未设置}${NC}\n"
 
-    current_status=$(get_proxy_status)
-    current_ip=$(get_lan_ip)
-    if [[ -f "$CONFIG_FILE" ]]; then
-        current_port=$(cat "$CONFIG_FILE" 2>/dev/null)
+    local new_socks new_http
+    prompt_port "新 SOCKS5 端口" new_socks
+    prompt_port "新 HTTP  端口" new_http
+    save_config "$new_socks" "$new_http"
+    SOCKS_PORT="$new_socks"
+    HTTP_PORT="$new_http"
+
+    echo -e "${G}  [✓] 端口已更新${NC}"
+
+    if is_proxy_running; then
+        echo -ne "  ${Y}代理正在运行，是否立即重启以生效? [Y/n]: ${NC}"
+        read -r yn
+        if [[ "${yn,,}" != "n" ]]; then
+            stop_proxy_silent
+            sleep 0.3
+            start_proxy
+        fi
+    fi
+    echo -ne "\n${DIM}  按回车返回菜单...${NC}"; read -r
+}
+
+# ================================================================
+#  § 7  主菜单 UI
+# ================================================================
+
+draw_header() {
+    load_config
+    local status_str pid_str ip_list socks_str http_str
+
+    if is_proxy_running; then
+        status_str="${G}● 运行中${NC}"
+        pid_str="$(get_proxy_pid)"
+    else
+        status_str="${R}○ 已停止${NC}"
+        pid_str="-"
     fi
 
-    echo -e "${BLUE}╔═════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║${NC}          ${GREEN}局域网共享代理管理面板${NC} (gost版)        ${BLUE}║${NC}"
-    echo -e "${BLUE}╠═════════════════════════════════════════════════╣${NC}"
-    echo -e "${BLUE}║${NC} 当前状态 : $current_status"
-    echo -e "${BLUE}║${NC} 本机内网 : ${YELLOW}$current_ip${NC}"
-    echo -e "${BLUE}║${NC} 代理端口 : ${YELLOW}$current_port${NC}"
-    echo -e "${BLUE}╠═════════════════════════════════════════════════╣${NC}"
-    echo -e "${BLUE}║${NC}  ${YELLOW}1.${NC} 启动 / 重启代理 (首次启动引导设置)           ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}  ${YELLOW}2.${NC} 卸载代理 (停止进程并清理所有痕迹)            ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}  ${YELLOW}3.${NC} 查看当前配置详情                             ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}  ${YELLOW}4.${NC} 实时查看底层日志 (排错专用)                  ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}  ${YELLOW}5.${NC} 修改端口号                                   ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}  ${RED}0.${NC} 退出面板 (代理后台常驻，敲 ${GREEN}start${NC} 随时唤出)   ${BLUE}║${NC}"
-    echo -e "${BLUE}╚═════════════════════════════════════════════════╝${NC}"
-    echo -ne " ${DIM}请选择操作选项 [0-5]:${NC} "
+    ip_list="$(get_lan_ips)"
+    socks_str="${SOCKS_PORT:-未配置}"
+    http_str="${HTTP_PORT:-未配置}"
+
+    clear
+    echo -e "${C}╔══════════════════════════════════════════════════════╗${NC}"
+    echo -e "${C}║${W}       LAN Proxy Panel  ·  powered by gost            ${C}║${NC}"
+    echo -e "${C}╠══════════════════════════════════════════════════════╣${NC}"
+    printf "${C}║${NC}  状态   : %-43b${C}║${NC}\n" "${status_str}"
+    printf "${C}║${NC}  PID    : %-44s${C}║${NC}\n" "${pid_str}"
+    printf "${C}║${NC}  SOCKS5 : %-44s${C}║${NC}\n" "${socks_str}"
+    printf "${C}║${NC}  HTTP   : %-44s${C}║${NC}\n" "${http_str}"
+    echo -e "${C}╠══════════════════════════════════════════════════════╣${NC}"
+
+    if [[ -z "$ip_list" ]]; then
+        printf "${C}║${NC}  ${R}局域网 IP : 暂无（请检查 Wi-Fi 连接）${NC}%-16s${C}║${NC}\n" ""
+    else
+        while IFS= read -r ip; do
+            printf "${C}║${NC}  ${G}▶${NC} %-51s${C}║${NC}\n" "${ip}"
+        done <<< "$ip_list"
+    fi
+
+    echo -e "${C}╠══════════════════════════════════════════════════════╣${NC}"
+    echo -e "${C}║${NC}  ${W}1${NC}. 启动 / 重启代理                                   ${C}║${NC}"
+    echo -e "${C}║${NC}  ${W}2${NC}. 卸载代理（停止并清除配置）                         ${C}║${NC}"
+    echo -e "${C}║${NC}  ${W}3${NC}. 查看当前配置与连接地址                             ${C}║${NC}"
+    echo -e "${C}║${NC}  ${W}4${NC}. 实时查看日志                                       ${C}║${NC}"
+    echo -e "${C}║${NC}  ${W}5${NC}. 修改端口号                                         ${C}║${NC}"
+    echo -e "${C}║${NC}  ${W}0${NC}. 退出面板                                           ${C}║${NC}"
+    echo -e "${C}╚══════════════════════════════════════════════════════╝${NC}"
+    echo -e "  ${DIM}提示: 面板退出不影响后台代理，随时敲 ${W}start${DIM} 唤出${NC}\n"
 }
 
-main_loop() {
-    # 执行环境自检与固化
-    auto_install_env
-    
+main_menu() {
     while true; do
-        draw_menu
+        draw_header
+        echo -ne "${W}  请输入选项 [0-5]: ${NC}"
         read -r choice
+
         case "$choice" in
-            1)
-                start_proxy
-                ;;
-            2)
-                stop_proxy
-                ;;
-            3)
-                echo -e "\n${BLUE}========== 当前配置参数 ==========${NC}"
-                if [[ -f "$CONFIG_FILE" ]]; then
-                    echo -e "连接协议 : HTTP / SOCKS5 双栈自适应"
-                    echo -e "连接地址 : $(get_lan_ip)"
-                    echo -e "端口号码 : $(cat "$CONFIG_FILE")"
-                    echo -e "底层日志 : $LOG_FILE"
-                else
-                    echo -e "${DIM}尚未生成配置文件，请先启动代理。${NC}"
-                fi
-                echo -e "${BLUE}==================================${NC}"
-                read -n 1 -r -p "按任意键继续..."
-                ;;
-            4)
-                view_logs
-                ;;
-            5)
-                modify_port
-                ;;
+            1) action_start_restart ;;
+            2) action_uninstall     ;;
+            3) action_show_config   ;;
+            4) action_view_log      ;;
+            5) action_change_port   ;;
             0)
-                echo -e "\n${GREEN}[✔] 已退出面板！${NC}"
-                echo -e "${DIM}提示：哪怕完全关闭 Termux 会话，只要安卓未杀后台，代理将持续有效。${NC}"
-                echo -e "${DIM}若要再次呼出面板，随时随地输入命令: ${GREEN}start${NC}\n"
+                echo -e "\n${DIM}  代理仍在后台运行（若已启动），再见！${NC}\n"
                 exit 0
                 ;;
             *)
-                echo -e "${RED}[!] 无效的输入，请重新选择。${NC}"
-                sleep 1
+                echo -e "${R}  无效选项，请重新输入${NC}"
+                sleep 0.8
                 ;;
         esac
     done
 }
 
-# 启动入口
-main_loop
+# ================================================================
+#  § 8  入口
+# ================================================================
+
+main() {
+    self_solidify
+    main_menu
+}
+
+main "$@"
