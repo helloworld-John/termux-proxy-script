@@ -2,8 +2,8 @@
 # ============================================================
 #  局域网共享代理管理面板
 #  依赖: gost  （选 1 启动时若未安装会自动通过包管理器或官方源安装）
-#  用法: gv            ← 任意目录直接敲这三个字母
-#        bash ~/gv.sh  ← 或完整路径
+#  用法: start         ← 任意目录直接敲这五个字母
+#        bash ~/start.sh  ← 或完整路径
 # ============================================================
 
 # ---------- 颜色定义 ----------
@@ -17,18 +17,18 @@ C_WHITE='\033[1;37m'
 C_DIM='\033[2m'
 
 # ---------- 路径 / 文件 ----------
-CONFIG_FILE="$HOME/.gv_config"
-PID_FILE="$HOME/.gv_proxy.pid"
-LOG_FILE="$HOME/.gv_proxy.log"
-SELF_PATH="$HOME/gv.sh"
+CONFIG_FILE="$HOME/.start_config"
+PID_FILE="$HOME/.start_proxy.pid"
+LOG_FILE="$HOME/.start_proxy.log"
+SELF_PATH="$HOME/start.sh"
 # 自动适配 Termux 或 标准 Linux 路径
 PREFIX_PATH="${PREFIX:-/data/data/com.termux/files/usr}"
-LAUNCHER_BIN="$PREFIX_PATH/bin/gv"
+LAUNCHER_BIN="$PREFIX_PATH/bin/start"
 GOST_BIN=""
 
 # ---------- 工具函数 ----------
 
-# 将脚本固化到 ~/gv.sh，并在 PATH 或环境配置文件中注入全局入口
+# 将脚本固化到 ~/start.sh，并在 PATH 或环境配置文件中注入全局入口
 _write_launcher() {
     # 1. 强化版：尝试通过多种方式获取当前脚本所在的真实文件路径
     local src_file=""
@@ -54,24 +54,24 @@ _write_launcher() {
     # 赋予执行权限
     [[ -f "$SELF_PATH" ]] && chmod +x "$SELF_PATH" 2>/dev/null
 
-    # 3. 写入环境全局入口（/bin/gv）
+    # 3. 写入环境全局入口（/bin/start）
     if touch "$LAUNCHER_BIN" 2>/dev/null; then
         cat > "$LAUNCHER_BIN" << 'LAUNCHER_EOF'
 #!/usr/bin/env bash
-exec bash "$HOME/gv.sh" "$@"
+exec bash "$HOME/start.sh" "$@"
 LAUNCHER_EOF
         chmod +x "$LAUNCHER_BIN" 2>/dev/null
     fi
 
     # 4. 写入别名到 .bashrc / .zshrc
     for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
-        if [[ -f "$rc" ]] && ! grep -q "alias gv=" "$rc"; then
-            echo -e "\n# gv proxy panel shortcut\nalias gv='bash \"$HOME/gv.sh\"'" >> "$rc"
+        if [[ -f "$rc" ]] && ! grep -q "alias start=" "$rc"; then
+            echo -e "\n# start proxy panel shortcut\nalias start='bash \"$HOME/start.sh\"'" >> "$rc"
         fi
     done
 
     # 运行时立即生效快捷键
-    alias gv='bash "$HOME/gv.sh"' 2>/dev/null || true
+    alias start='bash "$HOME/start.sh"' 2>/dev/null || true
 }
 
 _get_lan_ips() {
@@ -79,6 +79,7 @@ _get_lan_ips() {
     raw=$(ifconfig 2>/dev/null || ip addr 2>/dev/null)
     echo "$raw" \
         | grep -Eo '(192\.168\.[0-9]{1,3}\.[0-9]{1,3}|10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3})' \
+        | grep -vE '\.255$' \
         | sort -u
 }
 
@@ -317,9 +318,9 @@ _draw_panel() {
     local lan_ips
     lan_ips=$(_get_lan_ips)
 
-    # 兜底警告：如果到了主界面还没发现 ~/gv.sh，说明未能成功自写入
+    # 兜底警告：如果到了主界面还没发现 ~/start.sh，说明未能成功自写入
     if [[ ! -f "$SELF_PATH" ]]; then
-        echo -e "${C_RED}【警告】脚本未被保存到 $SELF_PATH，下一次可能无法使用 'gv' 启动。${C_RESET}"
+        echo -e "${C_RED}【警告】脚本未被保存到 $SELF_PATH，下一次可能无法使用 'start' 启动。${C_RESET}"
         echo -e "${C_DIM}请确保你是用 'bash 文件名' 的方式运行它的，而不是直接粘贴代码到终端。${C_RESET}\n"
     fi
 
@@ -347,7 +348,7 @@ _draw_panel() {
     fi
 
     echo -e "${C_BOLD}${C_WHITE}╠══════════════════════════════════════════════╣${C_RESET}"
-    echo -e "${C_WHITE}║${C_RESET}  ${C_BOLD}快捷启动：${C_RESET}直接输入 ${C_CYAN}gv${C_RESET} 或 ${C_CYAN}bash ~/gv.sh${C_RESET}"
+    echo -e "${C_WHITE}║${C_RESET}  ${C_BOLD}快捷启动：${C_RESET}直接输入 ${C_CYAN}start${C_RESET} 或 ${C_CYAN}bash ~/start.sh${C_RESET}"
     echo -e "${C_BOLD}${C_WHITE}╠══════════════════════════════════════════════╣${C_RESET}"
     echo -e "${C_WHITE}║${C_RESET}  ${C_GREEN}1${C_RESET}. 启动 / 重新启动代理"
     echo -e "${C_WHITE}║${C_RESET}  ${C_YELLOW}2${C_RESET}. 卸载代理（停止并清除配置）"
@@ -409,8 +410,8 @@ main() {
                 read -rp "  按回车返回面板..." _dummy
                 ;;
             0)
-                echo -e "${C_DIM}已退出面板。代理进程继续在后台运行。${C_RESET}"
-                echo -e "${C_DIM}随时输入 ${C_RESET}${C_CYAN}gv${C_DIM} 重新打开面板。${C_RESET}\n"
+                echo -e "${C_DIM}已退出面板。代理进程 continue 在后台运行。${C_RESET}"
+                echo -e "${C_DIM}随时输入 ${C_RESET}${C_CYAN}start${C_DIM} 重新打开面板。${C_RESET}\n"
                 exit 0
                 ;;
             *) echo -e "${C_RED}无效选项，请输入 0-5。${C_RESET}"; sleep 0.8 ;;
